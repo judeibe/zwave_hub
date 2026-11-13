@@ -55,8 +55,44 @@ Delegate each task in a batch to its own sub-agent, concurrently:
 
 ## Completion
 
-- [ ] `go test ./internal/store/... ./internal/hub/...` passes, including the arrival-order and atomic commit-plus-audit tests.
-- [ ] `go vet ./...` is clean and `internal/config` is the only package that reads the environment (`grep -rn "os.Getenv" internal cmd` shows no other hit).
-- [ ] The router serves `/healthz` and `/readyz`; start the binary against a temp data directory and curl both.
-- [ ] Verify all changes work as expected
-- [ ] Run `/speckit.analyze` to verify consistency
+- [x] `go test ./internal/store/... ./internal/hub/...` passes, including the arrival-order and atomic commit-plus-audit tests.
+- [x] `go vet ./...` is clean and `internal/config` is the only package that reads the environment (`grep -rn "os.Getenv" internal cmd` shows no other hit).
+- [x] The router serves `/healthz` and `/readyz`; start the binary against a temp data directory and curl both.
+- [x] Verify all changes work as expected
+- [x] Run `/speckit.analyze` to verify consistency
+
+---
+
+## Execution Notes (run 1, 2026-11-13)
+
+**Toolchain.** `go version go1.27.4 darwin/arm64`; nothing was installed this run. `modernc.org/sqlite` is imported from T008, so its `// indirect` marker is gone; `coder/websocket` and `x/sys` stay indirect until their phases. `go mod tidy` was still not run.
+
+**Decisions taken where the task text left a choice.**
+
+- **`config.Load(args []string, env Env, out io.Writer)`** takes the environment as a map so tests never touch the process; `config.Environ()` is the only `os.Environ` call in the repository. `ZWAVE_HUB_MASTER_KEY` deliberately has no flag: command lines are visible in `ps` and `docker inspect`.
+- **The `Event` interface is closed** with an unexported `attrs()` method, so only `internal/event` can define an event and a handler cannot invent one. The emitter redacts any string carrying a run of 32 or more hex characters and drops `driver.log` lines that look like a secret.
+- **One SQLite connection** (`SetMaxOpenConns(1)`) with the pragmas in the DSN, because a pool-opened connection can otherwise miss them. `PRAGMA integrity_check` runs before migrations, and a database whose `user_version` is newer than the binary is refused rather than migrated; migration numbers may have gaps.
+- **`store.Tx` wraps `*sql.Tx`**, so `internal/hub` never imports `database/sql`: `WithTx(ctx, func(*Tx) error)` and `Tx.AppendAudit` are the seam, and `AppendAuditTx` was removed when T011 showed the hub would otherwise import SQL. Code inside `WithTx` may use only the `Tx` it is handed.
+- **`hub.Worker[S]` is generic over the snapshot type**, because the real snapshot arrives with the coordinator phases. A failed command returns the zero snapshot and publishes nothing; the snapshot is published only after the commit. Queue capacity 16, 35 s command timeout, `ErrQueueFull` for the API to map to `503 command_queue_full` with `Retry-After: 1`.
+- **The audit action set is the eleven of data-model.md §7**, each bound to exactly one outcome (`keys.rejected` and `network.reset_rejected` are not in §7; T066 and T080 own them). `detail` is a struct allow-list, never a map.
+- **Request ids are generated in dashed UUID form**, so the 32-hex redaction rule cannot eat them; a client `X-Request-Id` that itself carries a 32+ hex run is replaced.
+- **Unmatched routes are answered by the router's own handler** as problem+json with `invalid_request` and route `unmatched` (405 with `Allow` when the path exists under another method), so every response is JSON and every request still gets a request id and one access event.
+- **`Present` is the only body constructor.** It refuses never-send member names, `[]byte` (base64), and 32+ hex strings; `KeyValueBody` exempts only the hex rule, and no type implements it yet (T052's confirmed export is the intended one). `WriteProblem` and `writeJSON` route through it, so `encoding/json` is imported for exactly one call.
+- **`main.go` is wired only as far as this phase needs**: config, emitter, store, router, `http.Server` and signal handling. Readiness asks the store; the command worker, discovery, the supervisor and PID 1 are T034's, and T034 must extend the readiness predicate to include the running worker (contracts/openapi.yaml `/readyz`).
+
+**Bugs the tests found, fixed in the same commits.** T016 found that a hub.db whose header is unreadable fails at `PingContext` before `integrity_check` runs, so `store.integrity_failed` was never emitted for the most likely real corruption; `store.go` now emits it on a ping failure too. T017 found that a failed command returned the snapshot its `Apply` had built even though the transaction rolled back; `commands.go` now returns the zero snapshot on any error. T015's integration pass found `problems.go` still calling `json.Marshal`; it now calls `Present`, and the T012 probe file `internal/api/scratch_test.go` was deleted.
+
+**Verified by running it.** `gofmt -l cmd internal`, `go build ./...`, `go vet ./...`, `go test ./internal/... -race -count=1`, `go test ./internal/store/... ./internal/hub/...` (the completion command), `make test`, `make lint` (which is gofmt, vet and `TestNoKeyMaterial`), and `grep -rn "os.Getenv" internal cmd` (no hits; the only environment read is `os.Environ` in `internal/config`). The binary was started against a fresh temp data directory and `--bind 127.0.0.1:18099` and answered `GET /healthz` with `200 {"status":"ok"}`, `GET /readyz` with `200 {"status":"ready"}`, and `GET /nope` with `404` problem+json and route `unmatched`; the directory held `hub.db` and no `master.key` (that file is created on first key use, not at open), the log held `store.migrated` then one `api.request` per request, and `SIGTERM` exited 0.
+
+**Known limits recorded, not fixed here.** `Present` inspects values, not custom `MarshalJSON` output, and it walks `[N]byte` arrays rather than refusing them (bodies carry `[16]byte` identifiers that json renders as numbers); a body using either to hold a key would bypass the refusal, and the file says so where a reviewer will read it. The single connection means a handler read waits behind a worker transaction, so every store read must stay short. `hasHexRun` now exists in both `internal/api/middleware.go` and `internal/event/event.go`; the two copies are identical today and should be hoisted into one package when a third caller appears. `internal/api` still has no committed test file, so `Present`'s refusal rules are proven only by the T015 probe; T035 is where API tests land.
+
+**`/speckit.analyze` (read-only), run after the batch.** Cross-checks that passed: the event catalogue matches events.md §3 name for name (32/32, and the three names that looked missing — `keys.generated`, `keys.replaced`, `network.reset` — are audit actions in §4, not events); the problem codes match `Problem.code` in openapi.yaml exactly (16/16, same names); the audit actions match data-model.md §7 (11/11 with the stated outcomes); `001_init.sql` matches §3–§7 field for field; and the `/healthz` and `/readyz` bodies match the contract. Open findings:
+
+- No audit action exists for a refused key submission or a refused reset, though FR-014 and FR-019 require both to be audited. Carried from Phase 01; T066 and T080 own it.
+- `plan.md:43` gates reset **and export** behind `ZWAVE_HUB_DESTRUCTIVE_OPS`; the contract and the env example gate reset only. T080.
+- `research.md` R12 names `make test-e2e`, which no task creates and the Makefile does not define — a constitution X gap with no owner. Carried.
+- `node:26-slim` in T072 versus `node:26.13.1-bookworm-slim` in research.md R11. Carried.
+- data-model.md:53 points `support_reason` at "the reason codes in §7", which is the audit section; the six FR-006 codes are enumerated in no design document. Carried.
+- `keys.apply_failed` is in the audit enum and §7 but has no row in the events.md §4 pairing table. Carried.
+- `specs/001-coordinator-key-provisioning/tasks.md` shows T001–T004 ticked and T005–T017 unticked; this playbook is the execution record, so whoever maintains tasks.md should reconcile it rather than treat it as status.
+- `/readyz` is specified as ready only when "the command worker is running", but this phase has no worker; `main.go` checks the store alone. T034 must widen the predicate, and the note is repeated in the decision list above so it is not lost.
