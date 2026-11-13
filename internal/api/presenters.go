@@ -6,6 +6,10 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/judeibe/zwave_hub/internal/hub"
+	"github.com/judeibe/zwave_hub/internal/store"
 )
 
 // KeyValueBody is the marker a response body implements when the contract lets
@@ -291,4 +295,219 @@ func presentJoin(path, member string) string {
 // leak it exists to prevent (FR-013).
 func presentRefuse(path, rule string) error {
 	return fmt.Errorf("api: refusing response body: %s: %s", path, rule)
+}
+
+// This section holds the response shapes of the coordinator, network and audit
+// resources. Handlers hand a value built here to writeJSON, which runs it
+// through Present; none constructs a body of its own.
+
+// coordinatorBody is contracts/openapi.yaml Coordinator. Pointer members render
+// as JSON null, which the contract names for the optional ones.
+type coordinatorBody struct {
+	ID           string           `json:"id"`
+	IdentityKind string           `json:"identity_kind"`
+	USB          usbBody          `json:"usb"`
+	Model        modelBody        `json:"model"`
+	ZWave        *zwaveBody       `json:"zwave"`
+	Support      string           `json:"support"`
+	SupportRsn   *string          `json:"support_reason"`
+	Attached     bool             `json:"attached"`
+	Path         *string          `json:"path"`
+	PathKind     *string          `json:"path_kind,omitempty"`
+	Selectable   bool             `json:"selectable"`
+	Connection   string           `json:"connection"`
+	NextRetryAt  *string          `json:"next_retry_at"`
+	LastError    *lastErrorBody   `json:"last_error"`
+	Network      *coordNetworkOut `json:"network"`
+	FirstSeenAt  string           `json:"first_seen_at"`
+	LastSeenAt   string           `json:"last_seen_at"`
+}
+
+type usbBody struct {
+	VID    string  `json:"vid"`
+	PID    string  `json:"pid"`
+	Serial *string `json:"serial"`
+}
+
+type modelBody struct {
+	Manufacturer *string `json:"manufacturer"`
+	Product      *string `json:"product"`
+}
+
+type zwaveBody struct {
+	ManufacturerID  *int   `json:"manufacturer_id,omitempty"`
+	ProductType     *int   `json:"product_type,omitempty"`
+	ProductID       *int   `json:"product_id,omitempty"`
+	FirmwareVersion string `json:"firmware_version,omitempty"`
+	SDKVersion      string `json:"sdk_version,omitempty"`
+	ChipType        string `json:"chip_type,omitempty"`
+}
+
+type lastErrorBody struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	At      string `json:"at"`
+}
+
+type coordNetworkOut struct {
+	HomeID          string `json:"home_id"`
+	NodeCount       int    `json:"node_count"`
+	SecureNodeCount int    `json:"secure_node_count"`
+}
+
+// coordinatorListBody is the body of listCoordinators.
+type coordinatorListBody struct {
+	Items               []coordinatorBody `json:"items"`
+	ActiveCoordinatorID *string           `json:"active_coordinator_id"`
+}
+
+func optional(value string) *string {
+	if value == "" {
+		return nil
+	}
+	held := value
+	return &held
+}
+
+func timestamp(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// PresentCoordinator maps the hub's view of one device to the contract shape.
+// The network is shown only while the connection is ready, as the contract
+// says; the hub keeps it longer for the FR-003 gate.
+func presentCoordinator(c hub.Coordinator) coordinatorBody {
+	body := coordinatorBody{
+		ID:           c.ID,
+		IdentityKind: string(c.IdentityKind),
+		USB:          usbBody{VID: c.VID, PID: c.PID, Serial: optional(c.Serial)},
+		Model:        modelBody{Manufacturer: optional(c.Manufacturer), Product: optional(c.Product)},
+		Support:      string(c.Support),
+		SupportRsn:   optional(string(c.SupportReason)),
+		Attached:     c.Attached,
+		Path:         optional(c.Path),
+		Selectable:   c.Selectable,
+		Connection:   string(c.Connection),
+		FirstSeenAt:  timestamp(c.FirstSeenAt),
+		LastSeenAt:   timestamp(c.LastSeenAt),
+	}
+	if c.PathKind != "" {
+		kind := string(c.PathKind)
+		body.PathKind = &kind
+	}
+	if c.Controller != nil {
+		body.ZWave = &zwaveBody{
+			ManufacturerID:  c.Controller.ManufacturerID,
+			ProductType:     c.Controller.ProductType,
+			ProductID:       c.Controller.ProductID,
+			FirmwareVersion: c.Controller.FirmwareVersion,
+			SDKVersion:      c.Controller.SDKVersion,
+			ChipType:        c.Controller.ChipType,
+		}
+	}
+	if c.NextRetryAt != nil {
+		at := timestamp(*c.NextRetryAt)
+		body.NextRetryAt = &at
+	}
+	if c.LastError != nil {
+		body.LastError = &lastErrorBody{Code: c.LastError.Code, Message: c.LastError.Message, At: timestamp(c.LastError.At)}
+	}
+	if c.Connection == hub.ConnectionReady && c.Network != nil {
+		body.Network = &coordNetworkOut{
+			HomeID:          c.Network.HomeID,
+			NodeCount:       c.Network.NodeCount,
+			SecureNodeCount: c.Network.SecureNodeCount,
+		}
+	}
+	return body
+}
+
+// presentCoordinatorList maps a snapshot to the list body. Items is never nil,
+// so an empty hub renders [] rather than null (SC-008).
+func presentCoordinatorList(snap hub.Snapshot) coordinatorListBody {
+	items := make([]coordinatorBody, 0, len(snap.Coordinators))
+	for _, c := range snap.Coordinators {
+		items = append(items, presentCoordinator(c))
+	}
+	return coordinatorListBody{Items: items, ActiveCoordinatorID: optional(snap.ActiveID)}
+}
+
+// networkStatusBody is contracts/openapi.yaml NetworkStatus for the US1 scope:
+// the key members report the empty state until the key phases land.
+type networkStatusBody struct {
+	State                   string               `json:"state"`
+	ReadyForSecureInclusion bool                 `json:"ready_for_secure_inclusion"`
+	BlockingReasons         []blockingReasonBody `json:"blocking_reasons"`
+	ActiveCoordinatorID     *string              `json:"active_coordinator_id"`
+	HomeID                  *string              `json:"home_id"`
+	NodeCount               int                  `json:"node_count"`
+	SecureNodeCount         int                  `json:"secure_node_count"`
+	Keys                    keysBody             `json:"keys"`
+	KeyStore                keyStoreBody         `json:"key_store"`
+	Driver                  driverBody           `json:"driver"`
+}
+
+type blockingReasonBody struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type keysBody struct {
+	Revision          int      `json:"revision"`
+	AppliedRevision   *int     `json:"applied_revision"`
+	InEffect          bool     `json:"in_effect"`
+	ClassicComplete   bool     `json:"classic_complete"`
+	ConfiguredClasses []string `json:"configured_classes"`
+}
+
+type keyStoreBody struct {
+	State   string   `json:"state"`
+	Classes []string `json:"classes"`
+}
+
+type driverBody struct {
+	State               string         `json:"state"`
+	Restarts            int            `json:"restarts"`
+	ConsecutiveFailures int            `json:"consecutive_failures"`
+	SchemaVersion       *int           `json:"schema_version"`
+	LastError           *lastErrorBody `json:"last_error"`
+}
+
+// auditEntryBody is contracts/openapi.yaml AuditEntry. Detail is the closed
+// store.AuditDetail struct, so only allow-listed keys can appear.
+type auditEntryBody struct {
+	ID            int64             `json:"id"`
+	At            string            `json:"at"`
+	Action        string            `json:"action"`
+	ActorAddr     string            `json:"actor_addr"`
+	ActorLabel    *string           `json:"actor_label"`
+	RequestID     string            `json:"request_id"`
+	CoordinatorID *string           `json:"coordinator_id"`
+	SecurityClass *string           `json:"security_class"`
+	Outcome       string            `json:"outcome"`
+	Detail        store.AuditDetail `json:"detail"`
+}
+
+type auditPageBody struct {
+	Items      []auditEntryBody `json:"items"`
+	NextBefore *int64           `json:"next_before"`
+}
+
+func presentAuditPage(page store.AuditPage) auditPageBody {
+	items := make([]auditEntryBody, 0, len(page.Items))
+	for _, e := range page.Items {
+		items = append(items, auditEntryBody{
+			ID:            e.ID,
+			At:            timestamp(e.At),
+			Action:        string(e.Action),
+			ActorAddr:     e.ActorAddr,
+			ActorLabel:    optional(e.ActorLabel),
+			RequestID:     e.RequestID,
+			CoordinatorID: optional(e.CoordinatorID),
+			SecurityClass: optional(e.SecurityClass),
+			Outcome:       string(e.Outcome),
+			Detail:        e.Detail,
+		})
+	}
+	return auditPageBody{Items: items, NextBefore: page.NextBefore}
 }
