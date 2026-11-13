@@ -130,8 +130,12 @@ func (w *Worker[S]) execute(parent context.Context, j *job[S]) {
 	})
 	if err == nil {
 		w.snapshot.Store(&next)
+		j.reply <- jobResult[S]{snapshot: next}
+		return
 	}
-	j.reply <- jobResult[S]{snapshot: next, err: err}
+	// A failed command hands back nothing: an audit refusal rolls the state
+	// change back, so returning it would let a caller render uncommitted state.
+	j.reply <- jobResult[S]{err: err}
 }
 
 // failQueued answers every command still waiting with err, so no submitter is
