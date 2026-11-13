@@ -1,5 +1,7 @@
 package coordinator
 
+import "strings"
+
 // IdentityKind says what a coordinator id is bound to (FR-004). A serial
 // identity survives any port change; a topology identity survives re-plugging
 // into the same port only, which is why the API reports it.
@@ -120,27 +122,76 @@ type Device struct {
 
 // Resolve derives the identity from the USB attributes alone, so it is known
 // before the port is opened (R5): the serial when it is present and not a
-// placeholder, the topology path otherwise.
+// placeholder, the topology path otherwise. Attributes are normalised first —
+// sysfs pads its values and a device may report upper-case hex — so the same
+// stick serialises to the same id whatever case sysfs happens to use. A serial
+// that does carry identity is kept verbatim: it is the vendor's string, and
+// changing its case would bind the selection to a different id than the one
+// the hub stored.
 func Resolve(a Attributes) Identity {
-	// T021 fills in the derivation.
-	return Identity{}
+	vid := normaliseHex(a.VID)
+	pid := normaliseHex(a.PID)
+	serial := strings.TrimSpace(a.Serial)
+	if !PlaceholderSerial(serial) {
+		return Identity{
+			ID:     "usb:" + vid + ":" + pid + ":" + serial,
+			Kind:   IdentitySerial,
+			Serial: serial,
+		}
+	}
+	return Identity{
+		ID:   "usb:" + vid + ":" + pid + ":port:" + strings.TrimSpace(a.Topology),
+		Kind: IdentityTopology,
+	}
 }
 
 // PlaceholderSerial reports whether serial carries no identity: empty, "0001",
 // or an all-zero value. A device reporting one of those falls back to the USB
 // topology instead of binding a selection to a value many sticks share (R5).
+// Surrounding whitespace is ignored, so a padded value sysfs handed through
+// still matches; near misses such as "00010" are real serials and do not.
 func PlaceholderSerial(serial string) bool {
-	// T021 fills in the placeholder rules.
-	return false
+	s := strings.TrimSpace(serial)
+	if s == "" || s == "0001" {
+		return true
+	}
+	for _, r := range s {
+		if r != '0' {
+			return false
+		}
+	}
+	return true
 }
 
 // ResolveAll resolves every device's identity and marks collisions: when more
 // than one attached device resolves to the same id, each of them is ambiguous
-// and the hub refuses to guess which is which (R14 §11). The returned slice is
-// a copy; the input is not modified.
+// and the hub refuses to guess which is which (R14 §11). Only attached devices
+// count — an unplugged stick does not make its clone ambiguous — and the
+// durable support verdict is left alone, because ambiguity is a property of the
+// current device set, not a final judgement of the hardware. The returned slice
+// is a copy; the input is not modified.
 func ResolveAll(devices []Device) []Device {
-	// T021 fills in duplicate detection.
-	return devices
+	resolved := make([]Device, len(devices))
+	copy(resolved, devices)
+
+	counts := make(map[string]int, len(resolved))
+	for i := range resolved {
+		resolved[i].Identity = Resolve(resolved[i].Attributes)
+		if resolved[i].Attached {
+			counts[resolved[i].Identity.ID]++
+		}
+	}
+	for i := range resolved {
+		if !resolved[i].Attached || counts[resolved[i].Identity.ID] < 2 {
+			continue
+		}
+		resolved[i].Ambiguous = true
+		resolved[i].Reason = ReasonAmbiguousIdentity
+		if resolved[i].Support != SupportSupported && resolved[i].Support != SupportUnsupported {
+			resolved[i].Support = SupportUnverified
+		}
+	}
+	return resolved
 }
 
 // Selectable reports whether the device may be activated
@@ -150,6 +201,16 @@ func ResolveAll(devices []Device) []Device {
 // permission-denied device is a connection fault the operator can fix on the
 // host (R14 §6), not a final verdict on the hardware.
 func Selectable(d Device) bool {
-	// T021 fills in the rule.
-	return false
+	if !d.Attached || d.Ambiguous {
+		return false
+	}
+	return d.Support == SupportSupported || d.Support == SupportUnverified
+}
+
+// normaliseHex renders a sysfs hex attribute the way the id needs it: trimmed
+// and lower-case. Sysfs itself reports lower-case, but a fixture or a future
+// kernel is not required to, and an id that changed case between boots would
+// break the selection it is supposed to survive.
+func normaliseHex(v string) string {
+	return strings.ToLower(strings.TrimSpace(v))
 }
