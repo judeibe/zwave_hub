@@ -1,0 +1,17 @@
+{
+  "driver": {},
+  "controller": {
+    "homeId": 1597676577,
+    "ownNodeId": 1,
+    "manufacturerId": 134,
+    "productType": 257,
+    "productId": 90,
+    "firmwareVersion": "1.2",
+    "sdkVersion": "7.21.0",
+    "zwaveChipType": { "type": 7, "version": 0 }
+  },
+  "nodes": [
+    { "nodeId": 2, "highestSecurityClass": 1 },
+    { "nodeId": 3, "highestSecurityClass": -1 }
+  ]
+}
