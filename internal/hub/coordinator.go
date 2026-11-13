@@ -76,6 +76,23 @@ type Coordinator struct {
 	Connection Connection
 	Selectable bool
 	Network    *Network
+
+	// Controller is the Z-Wave module identity the driver reported; nil until
+	// identification has run. NextRetryAt and LastError describe the latest
+	// failed start and are cleared by a ready report.
+	Controller  *store.ControllerIdentity
+	NextRetryAt *time.Time
+	LastError   *LastError
+	FirstSeenAt time.Time
+	LastSeenAt  time.Time
+}
+
+// LastError is the cause of the latest failed driver start. Message is a fixed
+// sentence, never child output.
+type LastError struct {
+	Code    string
+	Message string
+	At      time.Time
 }
 
 // Snapshot is an immutable view of the coordinator domain. Workers publish it
@@ -170,6 +187,9 @@ type overlay struct {
 	reason     coordinator.Reason
 	connection Connection
 	network    *Network
+
+	nextRetryAt *time.Time
+	lastError   *LastError
 }
 
 // snapshot builds the published view of one coordinator.
@@ -208,6 +228,12 @@ func (k *knownCoordinator) snapshot() Coordinator {
 		Selectable: k.overlay.attached && !k.overlay.ambiguous &&
 			(support == coordinator.SupportSupported || support == coordinator.SupportUnverified),
 		Network: network,
+
+		Controller:  controllerOf(k.row),
+		NextRetryAt: k.overlay.nextRetryAt,
+		LastError:   k.overlay.lastError,
+		FirstSeenAt: k.row.FirstSeenAt,
+		LastSeenAt:  k.row.LastSeenAt,
 	}
 }
 
