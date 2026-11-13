@@ -180,7 +180,7 @@ func (s *Supervisor) run(ctx context.Context, target Target) {
 		}
 		if s.opts.Emitter != nil {
 			s.opts.Emitter.Emit(ctx, &event.DriverFailed{
-				Attempt: attempt, Reason: last.Code,
+				Attempt: attempt, Reason: eventReason(err),
 				DurationMS: time.Since(began).Milliseconds(), NextRetryAt: next,
 			}, event.Correlation{CoordinatorID: target.CoordinatorID})
 			if connection == "faulted" {
@@ -219,7 +219,7 @@ func (s *Supervisor) runOnce(ctx context.Context, target Target, attempt int) er
 	cmd.WaitDelay = StopGrace
 	began := time.Now()
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("driver: start child: %w", err)
+		return fmt.Errorf("%w: %v", errSpawn, err)
 	}
 	child := &childProcess{cmd: cmd, gone: make(chan struct{})}
 	go func() {
@@ -244,7 +244,7 @@ func (s *Supervisor) runOnce(ctx context.Context, target Target, attempt int) er
 		child.stop()
 		switch {
 		case isGone(child):
-			return fmt.Errorf("driver: child exited before ready: %w", errOrExit(child.err))
+			return fmt.Errorf("%w before ready: %v", errExited, errOrExit(child.err))
 		case errors.Is(err, ErrProtocolUnsupported):
 			return errProtocol
 		case errors.Is(err, context.DeadlineExceeded):
@@ -273,14 +273,14 @@ func (s *Supervisor) runOnce(ctx context.Context, target Target, attempt int) er
 	case <-ctx.Done():
 		child.stop()
 		if s.opts.Emitter != nil {
-			s.opts.Emitter.Emit(context.WithoutCancel(ctx), &event.DriverStopped{Reason: "requested"}, event.Correlation{CoordinatorID: target.CoordinatorID})
+			s.opts.Emitter.Emit(context.WithoutCancel(ctx), &event.DriverStopped{Reason: "shutdown"}, event.Correlation{CoordinatorID: target.CoordinatorID})
 		}
 		return ctx.Err()
 	case <-client.Done():
 		child.stop()
 		return errSocketClosed
 	case <-child.gone:
-		return fmt.Errorf("driver: child exited: %w", errOrExit(child.err))
+		return fmt.Errorf("%w: %v", errExited, errOrExit(child.err))
 	}
 }
 
@@ -320,6 +320,8 @@ var (
 	errProtocol     = errors.New("driver_protocol_unsupported")
 	errStartTimeout = errors.New("driver_start_timeout")
 	errSocketClosed = errors.New("driver_socket_closed")
+	errSpawn        = errors.New("driver_spawn_failed")
+	errExited       = errors.New("driver_exited")
 )
 
 func errOrExit(err error) error {
@@ -344,6 +346,24 @@ func errorCode(err error) string {
 
 // errorMessage is a fixed sentence per code: child output can name paths, and a
 // last-error field must never carry a log line.
+// eventReason maps a failure to the closed driver.failed reason set of
+// contracts/events.md §3.4. The API's last-error code is separate: it names the
+// cause for an operator, this names the phase for a log reader.
+func eventReason(err error) string {
+	switch {
+	case errors.Is(err, errProtocol):
+		return "protocol_unsupported"
+	case errors.Is(err, errStartTimeout):
+		return "handshake_timeout"
+	case errors.Is(err, errSpawn):
+		return "spawn_failed"
+	case errors.Is(err, errSocketClosed), errors.Is(err, errExited):
+		return "exited"
+	default:
+		return "start_listening_failed"
+	}
+}
+
 func errorMessage(err error) string {
 	switch errorCode(err) {
 	case "driver_protocol_unsupported":
