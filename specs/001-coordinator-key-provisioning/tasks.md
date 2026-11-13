@@ -25,7 +25,7 @@ Single Go module at the repository root. Application code in `cmd/zwave-hub/` an
 **Purpose**: Module, dependencies and the command surface every later phase builds on
 
 - [x] T001 Create the Go module and package skeleton in `go.mod`, `cmd/zwave-hub/main.go` and the `internal/{api,hub,coordinator,driver,store,event,config}` directories from plan.md §Source Code, with `go 1.27`
-- [ ] T002 [P] Add runtime dependencies to `go.mod`: `modernc.org/sqlite v1.62.0`, `github.com/coder/websocket v1.8.15`, `golang.org/x/sys`
+- [x] T002 [P] Add runtime dependencies to `go.mod`: `modernc.org/sqlite v1.62.0`, `github.com/coder/websocket v1.8.15`, `golang.org/x/sys`
 - [ ] T003 [P] Pin the radio sidecar in `sidecar/package.json` as `@zwave-js/server` 3.12.0 with `engines.node >= 20`, and commit the lockfile
 - [ ] T004 [P] Add `Makefile` targets `build`, `test`, `test-contract`, `lint`, `run-mock`, `image`, `up`, `rollback-check`; each target is the only way to run its action (constitution X)
 
