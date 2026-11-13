@@ -46,7 +46,7 @@ Delegate each task in a batch to its own sub-agent, concurrently:
 - [x] T009 [P] Implement AES-256-GCM seal/open and master-key loading in `internal/store/crypto.go`: `ZWAVE_HUB_MASTER_KEY` else `<data>/master.key` created `0600`, 12-byte nonce, AAD `zwave-hub/key/v1|<class>`, blob `[0x01][nonce][ciphertext‖tag]`
 - [x] T010 [P] Implement the append-only audit writer and cursor pagination in `internal/store/audit.go`: one insert function, no update or delete path, action constants, `detail` allow-list from data-model.md §7
 - [x] T011 Implement the serialized command worker in `internal/hub/commands.go`: one goroutine over a FIFO channel of capacity 16, each command one SQLite transaction that also writes its audit row, snapshot published only after commit; a full queue returns `503 command_queue_full` with `Retry-After: 1` and writes nothing (R9, FR-021, SC-009)
-- [ ] T012 [P] Implement RFC 9457 problem responses and the error-code mapping in `internal/api/problems.go`
+- [x] T012 [P] Implement RFC 9457 problem responses and the error-code mapping in `internal/api/problems.go`
 - [ ] T013 Implement middleware in `internal/api/middleware.go`: request id, actor capture (remote address plus optional self-declared label, recorded unverified), panic recovery, one access event per request
 - [ ] T014 Implement the router in `internal/api/router.go`: method-and-wildcard `ServeMux` under `/api/v1` plus `getHealth` at `/healthz` and `getReady` at `/readyz`, JSON content type, one mount point per resource for later phases
 - [ ] T015 [P] Create `internal/api/presenters.go` as the single constructor of response bodies, with the redaction helper that refuses any field on the never-send list (FR-013, SC-004)
