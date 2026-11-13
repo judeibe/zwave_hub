@@ -192,3 +192,37 @@ func TestPresentCoordinatorHidesNetworkUnlessReady(t *testing.T) {
 		t.Fatal("network hidden while ready")
 	}
 }
+
+// TestNewBodiesPassPresent runs the coordinator, network and audit bodies
+// through Present with every optional member populated, so a member that
+// Present refuses (a never-send name, a []byte, a 32-hex run) fails here and
+// not at the first request that fills it (SC-004).
+func TestNewBodiesPassPresent(t *testing.T) {
+	manufacturer := 134
+	retry := time.Now()
+	coordinatorFull := hub.Coordinator{
+		ID: "usb:10c4:ea60:aaa", VID: "10c4", PID: "ea60", Serial: "aaa",
+		Manufacturer: "Silicon Labs", Product: "CP2102N", Path: "/dev/serial/by-id/x",
+		PathKind: coordinator.PathByID, Attached: true, Selectable: true,
+		Connection: hub.ConnectionReady, Support: coordinator.SupportSupported,
+		Controller:  &store.ControllerIdentity{FirmwareVersion: "7.21", SDKVersion: "7.21.1", ManufacturerID: &manufacturer, ChipType: "7.0"},
+		NextRetryAt: &retry, LastError: &hub.LastError{Code: "driver_start_failed", Message: "x", At: retry},
+		Network: &hub.Network{HomeID: "0xdeadbeef", NodeCount: 3, SecureNodeCount: 2},
+	}
+	snap := hub.Snapshot{Coordinators: []hub.Coordinator{coordinatorFull}, ActiveID: coordinatorFull.ID, HomeID: "0xdeadbeef"}
+	bodies := map[string]any{
+		"coordinator": presentCoordinator(coordinatorFull),
+		"list":        presentCoordinatorList(snap),
+		"network":     buildNetworkStatus(snap),
+		"audit": presentAuditPage(store.AuditPage{Items: []store.AuditEntry{{
+			ID: 1, At: retry, Action: store.AuditCoordinatorRejected, Outcome: store.OutcomeRejected,
+			ActorAddr: "192.0.2.1", RequestID: "r", CoordinatorID: "usb:10c4:ea60:aaa",
+			Detail: store.AuditDetail{Reason: "coordinator_network_mismatch", ExpectedHomeID: "0x00000001", ActualHomeID: "0x00000002"},
+		}}}),
+	}
+	for name, body := range bodies {
+		if _, err := Present(body); err != nil {
+			t.Errorf("%s body refused by Present: %v", name, err)
+		}
+	}
+}
