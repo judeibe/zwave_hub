@@ -298,12 +298,12 @@ func insertAudit(ctx context.Context, ex auditExecer, entry AuditEntry) (int64, 
 
 // AppendAudit writes one audit row in a transaction of its own and returns its
 // id. A command that changes state in the same breath should use WithTx with
-// AppendAuditTx instead, so the change and its trail commit together.
+// Tx.AppendAudit instead, so the change and its trail commit together.
 func (s *Store) AppendAudit(ctx context.Context, entry AuditEntry) (int64, error) {
 	var id int64
-	err := s.WithTx(ctx, func(tx *sql.Tx) error {
+	err := s.WithTx(ctx, func(tx *Tx) error {
 		var err error
-		id, err = insertAudit(ctx, tx, entry)
+		id, err = tx.AppendAudit(ctx, entry)
 		return err
 	})
 	if err != nil {
@@ -312,14 +312,22 @@ func (s *Store) AppendAudit(ctx context.Context, entry AuditEntry) (int64, error
 	return id, nil
 }
 
-// AppendAuditTx writes one audit row on the caller's transaction. The row is
-// durable only when tx commits, which is the point: a command's state change and
-// its audit row succeed or fail as one. A nil tx is an error, not a panic.
-func AppendAuditTx(ctx context.Context, tx *sql.Tx, entry AuditEntry) (int64, error) {
-	if tx == nil {
+// Tx is the store's transaction handle. It carries the audit writer and, as
+// later phases land, the store operations a command needs; it deliberately does
+// not expose *sql.Tx, so the hub and API packages never import database/sql or
+// gain the ability to run arbitrary SQL (plan.md: internal/hub is "no SQL").
+type Tx struct {
+	tx *sql.Tx
+}
+
+// AppendAudit writes one audit row on this transaction. The row is durable only
+// when the transaction commits, which is the point: a command's state change and
+// its audit row succeed or fail as one.
+func (t *Tx) AppendAudit(ctx context.Context, entry AuditEntry) (int64, error) {
+	if t == nil || t.tx == nil {
 		return 0, errors.New("store: transaction is nil")
 	}
-	return insertAudit(ctx, tx, entry)
+	return insertAudit(ctx, t.tx, entry)
 }
 
 // WithTx runs fn inside a transaction on the store's single connection: it
@@ -327,16 +335,16 @@ func AppendAuditTx(ctx context.Context, tx *sql.Tx, entry AuditEntry) (int64, er
 // fn must use only the tx it is handed; calling a Store method inside fn would
 // wait for the connection this transaction already holds, and the pool is capped
 // at one, so it would block until ctx is cancelled.
-func (s *Store) WithTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+func (s *Store) WithTx(ctx context.Context, fn func(tx *Tx) error) error {
+	raw, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: begin transaction: %w", err)
 	}
-	defer tx.Rollback()
-	if err := fn(tx); err != nil {
+	defer raw.Rollback()
+	if err := fn(&Tx{tx: raw}); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := raw.Commit(); err != nil {
 		return fmt.Errorf("store: commit transaction: %w", err)
 	}
 	return nil
