@@ -1,0 +1,478 @@
+package api
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/judeibe/zwave_hub/internal/coordinator"
+	"github.com/judeibe/zwave_hub/internal/hub"
+	"github.com/judeibe/zwave_hub/internal/store"
+)
+
+// restartFixture is one process lifetime of the hub over a fixed data
+// directory. It embeds handlerFixture so requests go through the same helpers as
+// the other API tests; the shutdown it adds is what lets a test close one
+// lifetime and open the next over the same directory, which is the full restart
+// of SC-003 and SC-006.
+type restartFixture struct {
+	handlerFixture
+	cancel context.CancelFunc
+	done   chan struct{}
+	stop   sync.Once
+}
+
+// openRestartFixture opens dataDir and starts a hub over it. The master key is
+// the same bytes in every lifetime, because keys one run sealed have to open in
+// the next, and supplying it keeps Open from creating a master.key file.
+func openRestartFixture(t *testing.T, dataDir string) *restartFixture {
+	t.Helper()
+	st, err := store.Open(context.Background(), store.Options{
+		DataDir:   dataDir,
+		MasterKey: []byte("0123456789abcdef0123456789abcdef"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := hub.New(st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); h.Run(ctx) }()
+
+	rt := NewRouter(Options{})
+	NewCoordinators(h).Mount(rt)
+	NewNetwork(h).Mount(rt)
+	NewKeys(h).Mount(rt)
+	NewAudit(st).Mount(rt)
+
+	f := &restartFixture{
+		handlerFixture: handlerFixture{hub: h, store: st, router: rt},
+		cancel:         cancel,
+		done:           done,
+	}
+	t.Cleanup(func() { f.close(t) })
+	return f
+}
+
+// close stops the hub and releases the database. It is idempotent because a test
+// closes the earlier lifetime explicitly and cleanup closes it again.
+func (f *restartFixture) close(t *testing.T) {
+	t.Helper()
+	f.stop.Do(func() {
+		f.cancel()
+		<-f.done
+		if err := f.store.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+}
+
+// wantField is one member a response body must carry.
+type wantField struct {
+	name  string
+	value any
+}
+
+// assertBody fails unless rec is 200 and its decoded body holds every want, and
+// returns the body for the checks that need a nested member.
+func assertBody(t *testing.T, what string, rec *httptest.ResponseRecorder, wants ...wantField) map[string]any {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s: status %d: %s", what, rec.Code, rec.Body)
+	}
+	body := decode(t, rec)
+	for _, want := range wants {
+		if got := body[want.name]; got != want.value {
+			t.Errorf("%s: %s = %v, want %v", what, want.name, got, want.value)
+		}
+	}
+	return body
+}
+
+// TestRestartRestoresSelectionAndReady drives SC-003 and SC-006 through the HTTP
+// surface: a selection committed before a full restart comes back with the
+// network it adopted, and re-attaching the same device at a different path
+// returns the coordinator to ready without the operator selecting it again.
+func TestRestartRestoresSelectionAndReady(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	dev := device("aaa")
+	const homeID = "0x00000001"
+
+	// First lifetime: the only mutating request of the whole test is the one
+	// accepted configuration change, the operator's selection.
+	first := openRestartFixture(t, dataDir)
+	if err := first.hub.SyncDiscovery(ctx, []coordinator.Device{dev}); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	if rec := first.do("PUT", "/api/v1/active-coordinator", `{"coordinator_id":"`+dev.Identity.ID+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("select status %d: %s", rec.Code, rec.Body)
+	}
+	if err := first.hub.Adopt(ctx, dev.Identity.ID, hub.Identified{
+		Network: hub.Network{HomeID: homeID},
+	}); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	assertBody(t, "before restart", first.do("GET", "/api/v1/network", ""),
+		wantField{"state", "degraded"},
+		wantField{"ready_for_secure_inclusion", false},
+		wantField{"active_coordinator_id", dev.Identity.ID},
+		wantField{"home_id", homeID},
+	)
+	first.close(t)
+
+	// Second lifetime: a new store handle and a new hub over the same directory.
+	// No request has been served yet, so what the snapshot holds here was read
+	// back from the database by hub.New, not rebuilt by a client.
+	second := openRestartFixture(t, dataDir)
+	if snap := second.hub.Snapshot(); snap.ActiveID != dev.Identity.ID || snap.HomeID != homeID {
+		t.Fatalf("restored snapshot active %q home %q, want %q and %q",
+			snap.ActiveID, snap.HomeID, dev.Identity.ID, homeID)
+	}
+
+	// The selected device is not attached yet, so nothing may have been started
+	// for it (FR-016) and the network waits for it.
+	active := assertBody(t, "after restart", second.do("GET", "/api/v1/active-coordinator", ""),
+		wantField{"id", dev.Identity.ID},
+		wantField{"connection", "not_attached"},
+		wantField{"support", "supported"},
+		wantField{"attached", false},
+	)
+	if active["network"] != nil {
+		t.Errorf("after restart: network %v shown for a coordinator that is not ready", active["network"])
+	}
+	assertBody(t, "after restart", second.do("GET", "/api/v1/network", ""),
+		wantField{"state", "awaiting_coordinator"},
+		wantField{"active_coordinator_id", dev.Identity.ID},
+		wantField{"home_id", homeID},
+	)
+
+	// The same stick reappears at a different node, and a stranger appears
+	// beside it. Discovery records both and changes neither's selection: the
+	// identity, not the path, is what the selection is bound to.
+	replugged := dev
+	replugged.TTY = "ttyUSB1"
+	replugged.Path = "/dev/ttyUSB1"
+	replugged.PathKind = coordinator.PathTTY
+	stranger := device("zzz")
+	if err := second.hub.SyncDiscovery(ctx, []coordinator.Device{replugged, stranger}); err != nil {
+		t.Fatalf("re-plug sync: %v", err)
+	}
+	list := decode(t, second.do("GET", "/api/v1/coordinators", ""))
+	if list["active_coordinator_id"] != dev.Identity.ID {
+		t.Errorf("a new device changed the selection to %v", list["active_coordinator_id"])
+	}
+	if items, _ := list["items"].([]any); len(items) != 2 {
+		t.Errorf("coordinators = %v, want the selected device and the stranger", list["items"])
+	}
+
+	// The driver identifies the re-plugged stick and reports it ready. Nothing
+	// here selects it again: the identity is the one the store restored.
+	if err := second.hub.Adopt(ctx, dev.Identity.ID, hub.Identified{
+		Network: hub.Network{HomeID: homeID},
+	}); err != nil {
+		t.Fatalf("re-adopt: %v", err)
+	}
+	active = assertBody(t, "after re-plug", second.do("GET", "/api/v1/active-coordinator", ""),
+		wantField{"id", dev.Identity.ID},
+		wantField{"connection", "ready"},
+		wantField{"attached", true},
+		wantField{"path", "/dev/ttyUSB1"},
+		wantField{"path_kind", "tty"},
+	)
+	if network, _ := active["network"].(map[string]any); network["home_id"] != homeID {
+		t.Errorf("after re-plug: network %v, want home id %s", active["network"], homeID)
+	}
+	assertBody(t, "after re-plug", second.do("GET", "/api/v1/network", ""),
+		wantField{"state", "degraded"},
+		wantField{"ready_for_secure_inclusion", false},
+		wantField{"active_coordinator_id", dev.Identity.ID},
+		wantField{"home_id", homeID},
+	)
+
+	// Exactly one selection was ever committed: the durable trail across both
+	// lifetimes holds the one operator request and no second one disguised as a
+	// restore.
+	page := decode(t, second.do("GET", "/api/v1/audit?action=coordinator.selected", ""))
+	if items, _ := page["items"].([]any); len(items) != 1 {
+		t.Errorf("coordinator.selected audit rows = %v, want exactly the one committed before the restart", page["items"])
+	}
+
+	// The keys.in_effect clause of T058: a key change made through the API is
+	// stored and reported as not running, and becomes running once the child
+	// comes back carrying it, inside the 20 s p95 budget of plan.md
+	// §Performance Goals.
+	fresh := map[string]string{
+		hub.SecurityClassS2AccessControl:   "00112233445566778899aabbccddeeff",
+		hub.SecurityClassS2Authenticated:   "102132435465768798a9bacbdcedfe0f",
+		hub.SecurityClassS2Unauthenticated: "2031425364758697a8b9cadbecfd0e1f",
+		hub.SecurityClassS0Legacy:          "30415263748596a7b8c9daebfc0d1e2f",
+	}
+	started := time.Now()
+	submitted := assertBody(t, "after key change",
+		second.do("PUT", "/api/v1/keys", keysTestSubmissionBody(t, "", fresh)),
+		wantField{"in_effect", false},
+	)
+
+	// The network body the clause is written against says the same thing before
+	// the driver has reported: the revision is stored, not running.
+	stored := assertBody(t, "after key change", second.do("GET", "/api/v1/network", ""))
+	if keys, _ := stored["keys"].(map[string]any); keys["in_effect"] != false {
+		t.Errorf("after key change: keys.in_effect = %v before the driver's report, want false", keys["in_effect"])
+	}
+
+	// The fixture runs no supervisor, so the child's return is reported here, as
+	// Adopt stands in for the ready report: the revision the child was started
+	// with is the one now running (FR-015).
+	revision := keysTestIntMember(t, "after key change", submitted, "revision")
+	if err := second.hub.NoteKeysApplied(ctx, dev.Identity.ID, revision, homeID, started); err != nil {
+		t.Fatalf("note the applied revision: %v", err)
+	}
+	applied := awaitKeysInEffect(t, second, "after key change", started)
+	keys, _ := applied["keys"].(map[string]any)
+	if keys["revision"] != submitted["revision"] {
+		t.Errorf("after key change: keys.revision = %v, want the submitted revision %v", keys["revision"], submitted["revision"])
+	}
+	if keys["applied_revision"] != keys["revision"] {
+		t.Errorf("after key change: keys.applied_revision = %v, want the running revision %v", keys["applied_revision"], keys["revision"])
+	}
+}
+
+// keysInEffectBudget is the p95 of plan.md §Performance Goals: how long a key
+// change may take to reach keys.in_effect, dominated by the driver restart.
+// One test measures one transition, so it asserts that transition stays inside
+// the budget rather than making a claim about the distribution.
+const keysInEffectBudget = 20 * time.Second
+
+// awaitKeysInEffect polls the network body until the committed revision is the
+// one running, and fails when the budget passes first. A revision is applied on
+// the child's next start (FR-012), so the value turns true after the driver's
+// report rather than in the response to the change.
+func awaitKeysInEffect(t *testing.T, f *restartFixture, what string, started time.Time) map[string]any {
+	t.Helper()
+	for {
+		rec := f.do("GET", "/api/v1/network", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: network status %d: %s", what, rec.Code, rec.Body)
+		}
+		body := decode(t, rec)
+		keys, _ := body["keys"].(map[string]any)
+		if keys["in_effect"] == true {
+			return body
+		}
+		if elapsed := time.Since(started); elapsed > keysInEffectBudget {
+			t.Fatalf("%s: keys.in_effect still %v %s after the key change, want true within the %s budget",
+				what, keys["in_effect"], elapsed, keysInEffectBudget)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestUS2KeysSurviveARestart is the US2 independent test of the playbook's
+// completion section: from a selected coordinator with no keys, the first ready
+// report of a stick that carries no network generates the four classic keys
+// (FR-008, the zero-node guard), the network reports ready for secure
+// inclusion, and a full restart of the hub comes back with the same set and
+// the same readiness.
+//
+// The fixture runs no supervisor, so the report that says the child came back
+// with the revision is made directly, exactly as Adopt stands in for the
+// driver's ready report.
+func TestUS2KeysSurviveARestart(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	dev := device("aaa")
+	const homeID = "0x00000001"
+
+	first := openRestartFixture(t, dataDir)
+	if err := first.hub.SyncDiscovery(ctx, []coordinator.Device{dev}); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	if rec := first.do("PUT", "/api/v1/active-coordinator", `{"coordinator_id":"`+dev.Identity.ID+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("select status %d: %s", rec.Code, rec.Body)
+	}
+	// The driver's ready report on a stick with no network: nothing is
+	// configured, so the hub generates the classic set (FR-008).
+	if err := first.hub.Adopt(ctx, dev.Identity.ID, hub.Identified{Network: hub.Network{HomeID: homeID}}); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	revision := first.hub.CommittedKeyRevision()
+	if revision != 1 {
+		t.Fatalf("the committed key revision is %d, want the automatically generated classic set", revision)
+	}
+	if err := first.hub.NoteKeysApplied(ctx, dev.Identity.ID, revision, homeID, time.Now()); err != nil {
+		t.Fatalf("note the applied revision: %v", err)
+	}
+
+	assertBody(t, "before restart", first.do("GET", "/api/v1/network", ""),
+		wantField{"state", "ready"},
+		wantField{"ready_for_secure_inclusion", true},
+		wantField{"home_id", homeID},
+	)
+	assertClassicSet(t, "before restart", first.do("GET", "/api/v1/keys", ""))
+	first.close(t)
+
+	// The second lifetime reads the same database. Nothing is generated again:
+	// the set is on record, so the trigger's preconditions no longer hold.
+	second := openRestartFixture(t, dataDir)
+	if err := second.hub.SyncDiscovery(ctx, []coordinator.Device{dev}); err != nil {
+		t.Fatalf("restart sync: %v", err)
+	}
+	if err := second.hub.Adopt(ctx, dev.Identity.ID, hub.Identified{Network: hub.Network{HomeID: homeID}}); err != nil {
+		t.Fatalf("re-adopt: %v", err)
+	}
+	if got := second.hub.CommittedKeyRevision(); got != revision {
+		t.Errorf("the key revision after the restart is %d, want %d: the set is not generated twice", got, revision)
+	}
+	assertBody(t, "after restart", second.do("GET", "/api/v1/network", ""),
+		wantField{"state", "ready"},
+		wantField{"ready_for_secure_inclusion", true},
+		wantField{"home_id", homeID},
+	)
+	assertClassicSet(t, "after restart", second.do("GET", "/api/v1/keys", ""))
+}
+
+// assertClassicSet proves the four classic classes are configured and the Long
+// Range pair is not: the automatic generation provisions the classic set alone
+// (FR-008), and a client can tell the two apart from the metadata alone.
+func assertClassicSet(t *testing.T, what string, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s: keys status %d: %s", what, rec.Code, rec.Body)
+	}
+	body := decode(t, rec)
+	classes, _ := body["classes"].([]any)
+	configured := map[string]bool{}
+	for _, entry := range classes {
+		class, _ := entry.(map[string]any)
+		name, _ := class["class"].(string)
+		configured[name], _ = class["configured"].(bool)
+	}
+	for _, class := range []string{"S2_AccessControl", "S2_Authenticated", "S2_Unauthenticated", "S0_Legacy"} {
+		if !configured[class] {
+			t.Errorf("%s: %s is not configured, want the classic set: %v", what, class, configured)
+		}
+	}
+	for _, class := range []string{"S2_Authenticated_LR", "S2_AccessControl_LR"} {
+		if configured[class] {
+			t.Errorf("%s: %s is configured, want no Long Range key: %v", what, class, configured)
+		}
+	}
+	if body["classic_complete"] != true {
+		t.Errorf("%s: classic_complete = %v, want true", what, body["classic_complete"])
+	}
+}
+
+// TestRemovalAndReturnKeepsReady is the US3 independent test of the playbook's
+// completion section: configure once, restart the hub with the device still
+// attached, and the coordinator returns to ready without a second API call;
+// then the same node leaves and returns and the states repeat, with the
+// selection untouched throughout.
+func TestRemovalAndReturnKeepsReady(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	dev := device("aaa")
+	const homeID = "0x00000001"
+
+	adopt := func(f *restartFixture, what string) {
+		t.Helper()
+		if err := f.hub.Adopt(ctx, dev.Identity.ID, hub.Identified{Network: hub.Network{HomeID: homeID}}); err != nil {
+			t.Fatalf("%s adopt: %v", what, err)
+		}
+	}
+	// ready asserts the one view the whole test keeps returning to.
+	ready := func(f *restartFixture, what string) {
+		t.Helper()
+		active := assertBody(t, what, f.do("GET", "/api/v1/active-coordinator", ""),
+			wantField{"id", dev.Identity.ID},
+			wantField{"connection", "ready"},
+			wantField{"attached", true},
+			wantField{"support", "supported"},
+		)
+		if network, _ := active["network"].(map[string]any); network["home_id"] != homeID {
+			t.Errorf("%s: network %v, want home id %s", what, active["network"], homeID)
+		}
+		// The coordinator is ready but no keys are configured, so the derived
+		// state is degraded and secure inclusion is not ready yet.
+		assertBody(t, what, f.do("GET", "/api/v1/network", ""),
+			wantField{"state", "degraded"},
+			wantField{"ready_for_secure_inclusion", false},
+			wantField{"active_coordinator_id", dev.Identity.ID},
+			wantField{"home_id", homeID},
+		)
+	}
+
+	// First lifetime: the operator's selection, the only configuration change
+	// of the test, and the driver's first ready report.
+	first := openRestartFixture(t, dataDir)
+	if err := first.hub.SyncDiscovery(ctx, []coordinator.Device{dev}); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	if rec := first.do("PUT", "/api/v1/active-coordinator", `{"coordinator_id":"`+dev.Identity.ID+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("select status %d: %s", rec.Code, rec.Body)
+	}
+	adopt(first, "before restart")
+	ready(first, "before restart")
+	first.close(t)
+
+	// Second lifetime: the device is still plugged in at the same path, so
+	// discovery finds it and the stored selection names it. Restore is what the
+	// bridge asks before starting a child (FR-015, FR-016).
+	second := openRestartFixture(t, dataDir)
+	if err := second.hub.SyncDiscovery(ctx, []coordinator.Device{dev}); err != nil {
+		t.Fatalf("restart sync: %v", err)
+	}
+	if got, ok := second.hub.Snapshot().Restore(); !ok || got.ID != dev.Identity.ID {
+		t.Fatalf("Restore after restart = %+v, %t; want %q", got, ok, dev.Identity.ID)
+	}
+	adopt(second, "after restart")
+	ready(second, "after restart")
+
+	// The node leaves. The selection stays, nothing is started, and the network
+	// waits: not_attached is what the bridge reports for a departed device
+	// (data-model.md §9.3). The adapter call stands in for that report, exactly
+	// as Adopt stands in for the driver's ready report.
+	if err := second.hub.SyncDiscovery(ctx, nil); err != nil {
+		t.Fatalf("removal sync: %v", err)
+	}
+	if got, ok := second.hub.Snapshot().Restore(); ok {
+		t.Fatalf("Restore returned %q after removal; want none", got.ID)
+	}
+	if err := second.hub.SetConnection(ctx, dev.Identity.ID, hub.ConnectionNotAttached, nil); err != nil {
+		t.Fatalf("report not_attached: %v", err)
+	}
+	assertBody(t, "after removal", second.do("GET", "/api/v1/active-coordinator", ""),
+		wantField{"id", dev.Identity.ID},
+		wantField{"connection", "not_attached"},
+		wantField{"attached", false},
+	)
+	assertBody(t, "after removal", second.do("GET", "/api/v1/network", ""),
+		wantField{"state", "awaiting_coordinator"},
+		wantField{"active_coordinator_id", dev.Identity.ID},
+		wantField{"home_id", homeID},
+	)
+
+	// The same node returns. It is the stored identity, so it is adopted without
+	// the operator selecting it again, and it is ready as before.
+	if err := second.hub.SyncDiscovery(ctx, []coordinator.Device{dev}); err != nil {
+		t.Fatalf("return sync: %v", err)
+	}
+	if got, ok := second.hub.Snapshot().Restore(); !ok || got.ID != dev.Identity.ID {
+		t.Fatalf("Restore after return = %+v, %t; want %q", got, ok, dev.Identity.ID)
+	}
+	adopt(second, "after return")
+	ready(second, "after return")
+
+	// One selection across both lifetimes and the removal: restore, adoption and
+	// re-attachment never wrote one.
+	page := decode(t, second.do("GET", "/api/v1/audit?action=coordinator.selected", ""))
+	if items, _ := page["items"].([]any); len(items) != 1 {
+		t.Errorf("coordinator.selected audit rows = %v, want exactly the one committed before the restart", page["items"])
+	}
+}

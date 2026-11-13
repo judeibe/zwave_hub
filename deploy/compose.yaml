@@ -1,0 +1,107 @@
+# zwave-hub — one image, one container, one lifecycle (constitution I).
+#
+# `make up` runs exactly this file (`docker compose -f deploy/compose.yaml up -d`)
+# and `make down` stops it, so the stack a developer starts and the stack CI starts
+# are the same recipe. There is no `build:` section on purpose: `make image` is the
+# only build path (constitution X), and the tag it built is the name `up` starts.
+#
+# The compose project directory is this one (`deploy/`), so `.env` below is both the
+# interpolation file for ${...} and the container's environment file. That is the
+# mechanism behind `cp deploy/zwave-hub.env.example deploy/.env` in quickstart.md §2:
+# one file feeds compose and the process. DIALOUT_GID has to live in it too, because
+# `group_add` is resolved by compose before any container exists.
+
+services:
+  zwave-hub:
+    image: ${ZWAVE_HUB_IMAGE:-zwave-hub:dev}
+    restart: unless-stopped
+
+    # The one list of settings is the operator's copy of deploy/zwave-hub.env.example.
+    # No `environment:` block repeats those names here, so a variable documented in
+    # the example is deployed without editing this file.
+    env_file:
+      - .env
+
+    # The API has no authentication (FR-020), so this published port *is* the trust
+    # boundary: whoever can reach it can read key metadata and, through the two-step
+    # confirmation, export keys or reset the network. Published on the host's default
+    # interface (no host IP in front of the colon) so the boundary is the host's
+    # firewall, not a guess about which interface faces the devices. The container
+    # side stays 8080 because that is the hub's default bind.
+    ports:
+      - "${ZWAVE_HUB_PORT:-8080}:8080"
+
+    # A fixed `--device /dev/ttyUSB0` would defeat FR-001 and FR-004: the stick may
+    # appear after start, and at a different path. So `/dev` is mounted whole with
+    # recursive slave propagation — a device node the kernel creates on the host after
+    # the container started still shows up inside it, and nothing propagates back out.
+    # Visible is not openable: the cgroup rules below decide what may be opened, which
+    # is what keeps this short of `--privileged`.
+    volumes:
+      - { type: bind, source: /dev, target: /dev, bind: { propagation: rslave } }
+      # hub.db, the fallback master.key and the zwave-js cache. State lives here, not
+      # in the container, so a recreate changes nothing (quickstart.md §4 scenario 8).
+      - zwave-data:/data
+
+    # rslave exposes every host device node; these two rules are the access control.
+    # Character majors 188 (`/dev/ttyUSB*`) and 166 (`/dev/ttyACM*`) may be read,
+    # written and mknod'd; everything else the mount reveals — disks included — cannot
+    # be opened.
+    device_cgroup_rules:
+      - "c 188:* rmw"
+      - "c 166:* rmw"
+
+    # Serial nodes are root:dialout on the host and the container user is non-root
+    # (10001). A gid only grants access if it is the host's, so the operator's value
+    # comes from deploy/.env: `stat -c '%g' /dev/ttyUSB0` prints it. 20 is Debian's
+    # dialout. A mismatch here is the `permission_denied` reason in runbook 7.3, and no
+    # amount of retrying repairs it.
+    group_add:
+      - "${DIALOUT_GID:-20}"
+
+    # Rendered driver config carries network keys and must never reach persistent
+    # storage, so it lives on tmpfs — and at /run/zwave-hub, not /run, because a mount
+    # over /run would hide the directory the image creates there. A tmpfs root is made
+    # by the kernel owned root:root while the hub runs non-root, so the mount itself
+    # needs mode=1777: the directory already exists and the hub's MkdirAll(0700) is
+    # satisfied by it, but without world-write the hub cannot create its 0600 files
+    # inside. That is not a host exposure — the mount exists only in this container's
+    # private mount namespace, and the files written in it stay 0600 owned by the hub
+    # user. 8 MB is a hard cap on the one directory holding key material; a rendered
+    # file is a few kilobytes.
+    tmpfs:
+      - /run/zwave-hub:size=8m,mode=1777
+
+    # Uses the Node runtime the sidecar already needs, rather than adding curl to the
+    # image. /readyz answers 200 with no coordinator attached (SC-008), so this
+    # measures the hub, not the hardware. The address is the hub's default in-container
+    # bind (ZWAVE_HUB_BIND=0.0.0.0:8080); change the two together. A hub that is ready
+    # in well under a second still gets a start period, so a cold first start is not
+    # marked unhealthy while the database is created.
+    healthcheck:
+      test: ["CMD","node","-e","fetch('http://127.0.0.1:8080/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+    # SIGTERM starts a sequence: the supervisor stops the driver child and waits up to
+    # 10s (driver.StopGrace), then the HTTP server drains in-flight requests with a 10s
+    # bound, then SQLite is closed. 30s covers both. The runtime's 10s default would
+    # SIGKILL the hub mid-drain.
+    stop_grace_period: 30s
+
+    # A driver restart loop (runbook 7.3) can log for hours and the hub never restarts
+    # itself, so the cap is what stops it from filling the host's disk. Bounded at
+    # three 10 MB files.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # Named rather than a bind mount: there is no host path to create or get wrong,
+  # `down` leaves it in place (only `down -v` removes it), and `docker volume` is the
+  # one place a backup comes from.
+  zwave-data:
