@@ -42,7 +42,7 @@ Delegate each task in a batch to its own sub-agent, concurrently:
 - [x] T020 [US1] Implement sysfs enumeration in `internal/coordinator/sysfs.go`: tty node → USB attributes through `/sys/class/tty`, reading `idVendor`, `idProduct`, `serial`, `manufacturer`, `product`
 - [x] T021 [US1] Implement identity derivation in `internal/coordinator/identity.go`: `usb:<vid>:<pid>:<serial>` or `usb:<vid>:<pid>:port:<topology>`, `identity_kind`, duplicate detection, `selectable` rule
 - [x] T022 [US1] Implement the discovery poller in `internal/coordinator/discover.go`: 2 s poll of `/sys/class/tty`, `/dev` cross-check, `unix.Access` on the resolved path to separate `permission_denied` from `not_passed_through`, `/dev/serial/by-id/...` preference, 300 ms debounce, snapshot publish
-- [ ] T023 [US1] Implement the coordinator store in `internal/store/coordinators.go`: upsert by id, `support` transition rules, `last_path`, `last_seen_at`, list and get, plus the singleton provisioning row read/write for `home_id`, `key_revision` and `applied_revision`
+- [x] T023 [US1] Implement the coordinator store in `internal/store/coordinators.go`: upsert by id, `support` transition rules, `last_path`, `last_seen_at`, list and get, plus the singleton provisioning row read/write for `home_id`, `key_revision` and `applied_revision`
 - [ ] T024 [US1] Implement selection and switching in `internal/hub/coordinator.go`: commit through the command queue, reject unsupported devices, accept an unverified device and detach it if identification later reports it unsupported, enforce the FR-003 `home_id` gate, retain the selection when the device disappears
 
 ## Completion
