@@ -41,7 +41,7 @@ Delegate each task in a batch to its own sub-agent, concurrently:
 
 - [x] T005 Implement configuration in `internal/config/config.go`: flags plus the eight `ZWAVE_HUB_*` variables from quickstart.md §2, base64 32-byte master-key validation, discovery-interval floor of 500 ms, `destructive_ops` parsing, fail-fast errors, and no environment reads outside this package (constitution III)
 - [x] T006 [P] Implement the emitter and event catalogue in `internal/event/event.go`: `log/slog` JSON handler only, typed events from `contracts/events.md`, allow-listed fields, and the never-send list enforced at construction (constitution VI)
-- [ ] T007 [P] Write the initial schema in `internal/store/migrations/001_init.sql` exactly as data-model.md §10, including `PRAGMA user_version = 1`
+- [x] T007 [P] Write the initial schema in `internal/store/migrations/001_init.sql` exactly as data-model.md §10, including `PRAGMA user_version = 1`
 - [ ] T008 Implement store open, pragmas and migration runner in `internal/store/store.go`: WAL, `synchronous=FULL`, `foreign_keys=ON` on every connection, `user_version` stepping, startup `PRAGMA integrity_check`
 - [ ] T009 [P] Implement AES-256-GCM seal/open and master-key loading in `internal/store/crypto.go`: `ZWAVE_HUB_MASTER_KEY` else `<data>/master.key` created `0600`, 12-byte nonce, AAD `zwave-hub/key/v1|<class>`, blob `[0x01][nonce][ciphertext‖tag]`
 - [ ] T010 [P] Implement the append-only audit writer and cursor pagination in `internal/store/audit.go`: one insert function, no update or delete path, action constants, `detail` allow-list from data-model.md §7
