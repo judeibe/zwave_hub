@@ -4,7 +4,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 )
@@ -162,7 +161,7 @@ func WriteProblem(w http.ResponseWriter, r *http.Request, p *Problem) {
 		p.RequestID = RequestIDFromContext(r.Context())
 	}
 	noteProblemCode(r, p.Code)
-	body, err := json.Marshal(p)
+	body, err := Present(p)
 	if err != nil {
 		w.Header().Set("Content-Type", problemMediaType)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -177,7 +176,7 @@ func WriteProblem(w http.ResponseWriter, r *http.Request, p *Problem) {
 // one writer the handlers share, so no response can quietly be text/plain. The
 // request is only used to stamp a request id on the unlikely encoding failure.
 func writeJSON(w http.ResponseWriter, r *http.Request, status int, body any) {
-	encoded, err := json.Marshal(body)
+	encoded, err := Present(body)
 	if err != nil {
 		WriteProblem(w, r, NewProblem(CodeInternalError, "The response could not be encoded."))
 		return

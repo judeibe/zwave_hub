@@ -49,7 +49,7 @@ Delegate each task in a batch to its own sub-agent, concurrently:
 - [x] T012 [P] Implement RFC 9457 problem responses and the error-code mapping in `internal/api/problems.go`
 - [x] T013 Implement middleware in `internal/api/middleware.go`: request id, actor capture (remote address plus optional self-declared label, recorded unverified), panic recovery, one access event per request
 - [x] T014 Implement the router in `internal/api/router.go`: method-and-wildcard `ServeMux` under `/api/v1` plus `getHealth` at `/healthz` and `getReady` at `/readyz`, JSON content type, one mount point per resource for later phases
-- [ ] T015 [P] Create `internal/api/presenters.go` as the single constructor of response bodies, with the redaction helper that refuses any field on the never-send list (FR-013, SC-004)
+- [x] T015 [P] Create `internal/api/presenters.go` as the single constructor of response bodies, with the redaction helper that refuses any field on the never-send list (FR-013, SC-004)
 - [ ] T016 [P] Write store tests in `internal/store/store_test.go`: migrate from empty and from `user_version` 0, foreign keys enforced, integrity check, crypto round-trip and tamper detection
 - [ ] T017 [P] Write command-queue tests in `internal/hub/commands_test.go`: arrival-order serialization under concurrent submissions, commit plus audit atomically, later-wins per class, no intermediate snapshot (FR-021, SC-009)
 
