@@ -53,8 +53,35 @@ Delegate each task in a batch to its own sub-agent, concurrently:
 
 ## Completion
 
-- [ ] `go version` reports 1.27.x (install with `brew install go`, then let `GOTOOLCHAIN=go1.27.4` fetch the exact toolchain, if it is missing); record the result in the commit message.
-- [ ] `go build ./...` succeeds on the empty skeleton and `make build` runs it.
-- [ ] `make` lists every target named in T004 and each one is runnable (targets that need later code may print a clear not-yet message but must exist).
-- [ ] Verify all changes work as expected
-- [ ] Run `/speckit.analyze` to verify consistency
+- [x] `go version` reports 1.27.x (install with `brew install go`, then let `GOTOOLCHAIN=go1.27.4` fetch the exact toolchain, if it is missing); record the result in the commit message.
+- [x] `go build ./...` succeeds on the empty skeleton and `make build` runs it.
+- [x] `make` lists every target named in T004 and each one is runnable (targets that need later code may print a clear not-yet message but must exist).
+- [x] Verify all changes work as expected
+- [x] Run `/speckit.analyze` to verify consistency
+
+## Execution Notes (run 1, 2026-11-13)
+
+**Toolchain.** `go version go1.27.4 darwin/arm64`, installed with `brew install go` (bottle go 1.27.4). `GOTOOLCHAIN` stayed at its `auto` default, so no separate toolchain download was needed. Node v22.17.0 / npm 11.19.0 and GNU Make 3.81 were already present.
+
+**Decisions taken where the task text left a choice.**
+
+- **Module path** is `github.com/judeibe/zwave_hub`, taken from `origin git@github.com:judeibe/zwave_hub.git`. plan.md does not name one.
+- **Package skeleton** is one `doc.go` per `internal/*` package. Empty directories are not tracked by git, so the package clause is what makes the skeleton survive a clone and makes `go build ./...` cover all seven packages.
+- **`.gitignore`** (`/bin/`, `node_modules/`, `deploy/.env`) was added with T001 so `make build` leaves no untracked artifacts.
+- **The `go.mod` requires are `// indirect`, and `go mod tidy` was deliberately not run.** Nothing imports the three modules until phase 2, and tidy would delete every require in the meantime. `go.sum` is committed with them.
+- **`golang.org/x/sys`** is not pinned by the task; `@latest` resolved to **v0.50.0**.
+- **`make down`** was added although T004's list omits it, because quickstart.md §3 documents "`make up` / `make down` | Compose lifecycle".
+- **`make test` and `make lint`** build their package list with `go list ./... | grep -v '/node_modules/'`. `make build` runs `npm ci`, and one npm dependency (`flatted`) ships Go source under `sidecar/node_modules`, which `./...` would otherwise compile and vet as if it were the hub's own.
+- **Targets whose file arrives later** (`test-contract` → T036, `image` → T072, `up`/`down` → T073, `rollback-check` → T077) exist now, name what is missing and what would run, and exit non-zero: a target that runs zero tests must not report a green (constitution V). Consequence: `make test-contract` is red until T036 lands, so T082's CI must not be enabled before it.
+
+**Verified by running it.** `go build ./...`, `go vet ./...`, `gofmt -l .` (clean), `make build` (binary builds and runs), `make test`, `make lint`, `make run-mock`, a dry run of all ten targets, and the guard message plus exit code for each of the five that need a later task.
+
+**`/speckit.analyze` (read-only), run after the batch.** 30/30 requirements have at least one task (FR-020 only implicitly, since "no authentication" is implemented by writing none). Open cross-artifact findings — most are already assigned to a later task, one has no owner:
+
+- No audit action exists for a refused key submission or a refused reset, though FR-014 and FR-019 require both to be audited, and `keys.in_use_rejected` has no paired action in `events.md` §4. The document's Default Decisions cover this for T053/T066/T080.
+- `plan.md:43` says reset **and export** sit behind `ZWAVE_HUB_DESTRUCTIVE_OPS`; the contract, env example and T070 gate reset only. Recorded for T080.
+- `research.md` R12 names `make test-e2e` as the end-to-end command; no task creates it and it is not in the Makefile. A constitution X gap with no owner.
+- `node:26-slim` in T072 and plan.md:129 versus `node:26.13.1-bookworm-slim` in research.md R11 — a floating minor in the reproducible-image task.
+- `data-model.md:53` says `support_reason` is "One of the reason codes in §7", but §7 is the Audit Entry section, and the six FR-006 codes are enumerated in no design document.
+- `keys.apply_failed` is in the audit action enum and §7 but has no row in the `events.md` §4 pairing table.
+
