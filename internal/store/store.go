@@ -88,7 +88,12 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		masterKey: opts.MasterKey,
 		emitter:   opts.Emitter,
 	}
+	// A connection that cannot even be established is evidence the file is
+	// unusable: the DSN pragmas read the database header, so a truncated or
+	// overwritten file fails here before integrity_check can run. This is the
+	// most likely real corruption, so it emits the same event.
 	if err := db.PingContext(ctx); err != nil {
+		s.emit(ctx, &event.StoreIntegrityFailed{Detail: integrityFailureDetail})
 		db.Close()
 		return nil, fmt.Errorf("store: connect to database: %w", err)
 	}
