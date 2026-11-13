@@ -3,12 +3,12 @@ module github.com/judeibe/zwave_hub
 go 1.27
 
 require (
+	github.com/coder/websocket v1.8.15
 	golang.org/x/sys v0.50.0
 	modernc.org/sqlite v1.62.0
 )
 
 require (
-	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
