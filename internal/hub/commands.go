@@ -61,11 +61,13 @@ type jobResult[S any] struct {
 	err      error
 }
 
-// job is one queued command plus its reply channel. The reply is buffered so
-// the worker never blocks when the submitter has already given up.
+// job is one queued entry plus its reply channel. The reply is buffered so the
+// worker never blocks when the submitter has already given up. Exactly one of
+// command and mutation is set.
 type job[S any] struct {
-	command Command[S]
-	reply   chan jobResult[S]
+	command  Command[S]
+	mutation func(ctx context.Context, tx *store.Tx, current S) (S, error)
+	reply    chan jobResult[S]
 }
 
 // Worker is the serialized command executor: one goroutine consumes a FIFO
@@ -120,6 +122,15 @@ func (w *Worker[S]) execute(parent context.Context, j *job[S]) {
 
 	var next S
 	err := w.store.WithTx(ctx, func(tx *store.Tx) error {
+		if j.mutation != nil {
+			current, _ := w.Snapshot()
+			after, err := j.mutation(ctx, tx, current)
+			if err != nil {
+				return err
+			}
+			next = after
+			return nil
+		}
 		snapshot, err := j.command.Apply(ctx, tx)
 		if err != nil {
 			return err
@@ -129,13 +140,20 @@ func (w *Worker[S]) execute(parent context.Context, j *job[S]) {
 		return err
 	})
 	if err == nil {
-		w.snapshot.Store(&next)
+		w.publish(next)
 		j.reply <- jobResult[S]{snapshot: next}
 		return
 	}
 	// A failed command hands back nothing: an audit refusal rolls the state
 	// change back, so returning it would let a caller render uncommitted state.
 	j.reply <- jobResult[S]{err: err}
+}
+
+// publish replaces the snapshot readers see. Only the worker goroutine calls
+// it after a commit, and the hub's constructor calls it once to seed the state
+// it loaded from the store.
+func (w *Worker[S]) publish(state S) {
+	w.snapshot.Store(&state)
 }
 
 // failQueued answers every command still waiting with err, so no submitter is
@@ -189,6 +207,49 @@ func (w *Worker[S]) Submit(ctx context.Context, command Command[S]) (S, error) {
 		}
 	case <-ctx.Done():
 		return zero, ctx.Err()
+	}
+}
+
+// mutate applies one committed change that carries no audit row: it runs on the
+// worker goroutine, in the same total order as commands, inside a transaction,
+// and publishes the state it returns only after that transaction commits. It is
+// unexported and belongs to changes a driver report implies — recording the
+// network identifier a ready coordinator reported, and clearing a selection
+// identification proved unsupported — which data-model.md §7 does not audit
+// because they are not operator configuration (FR-019 lists only the changes a
+// client makes). The queue stays the single writer of S, which is what keeps a
+// published snapshot ordered with the commands that surround it.
+func (w *Worker[S]) mutate(ctx context.Context, apply func(ctx context.Context, tx *store.Tx, current S) (S, error)) error {
+	if apply == nil {
+		return errors.New("hub: mutation has no apply function")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	j := &job[S]{mutation: apply, reply: make(chan jobResult[S], 1)}
+	select {
+	case w.queue <- j:
+	case <-w.stopped:
+		return ErrStopped
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return ErrQueueFull
+	}
+
+	select {
+	case result := <-j.reply:
+		return result.err
+	case <-w.stopped:
+		select {
+		case result := <-j.reply:
+			return result.err
+		default:
+			return ErrStopped
+		}
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
