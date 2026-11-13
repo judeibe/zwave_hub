@@ -654,9 +654,10 @@ func identityParts(id string) (vid, pid string) {
 // SetConnection records what the driver reported for one coordinator. A ready
 // report of the active coordinator with a home ID also stores it in the
 // provisioning row, which is what the FR-003 gate compares a replacement
-// against. The last network stays on record whatever the connection state, so
-// the gate can judge a replacement before it is selected. It is called by the
-// driver adapter, never by a client.
+// against, and runs the first-activation key generation when the controller
+// reports an empty network (FR-008). The last network stays on record whatever
+// the connection state, so the gate can judge a replacement before it is
+// selected. It is called by the driver adapter, never by a client.
 func (h *Hub) SetConnection(ctx context.Context, id string, conn Connection, network *Network) error {
 	switch conn {
 	case ConnectionNotAttached, ConnectionConnecting, ConnectionReady, ConnectionRetrying, ConnectionFaulted:
@@ -696,6 +697,9 @@ func (h *Hub) SetConnection(ctx context.Context, id string, conn Connection, net
 	})
 	if err != nil {
 		return fmt.Errorf("hub: record the network of %s: %w", id, err)
+	}
+	if err := h.generateOnActivation(ctx, id, held.NodeCount); err != nil {
+		return fmt.Errorf("hub: generate the first-activation keys of %s: %w", id, err)
 	}
 	return nil
 }

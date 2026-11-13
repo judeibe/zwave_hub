@@ -22,7 +22,13 @@ type handlerFixture struct {
 
 func newHandlerFixture(t *testing.T) *handlerFixture {
 	t.Helper()
-	st, err := store.Open(context.Background(), store.Options{DataDir: t.TempDir()})
+	// Key provisioning needs a master key; a real hub gets it from
+	// ZWAVE_HUB_MASTER_KEY or <DataDir>/master.key (R4), and tests supply a
+	// fixed 32-byte one rather than creating a file per fixture.
+	st, err := store.Open(context.Background(), store.Options{
+		DataDir:   t.TempDir(),
+		MasterKey: []byte("0123456789abcdef0123456789abcdef"),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
