@@ -336,3 +336,154 @@ func TestSelectRejectsNetworkMismatch(t *testing.T) {
 		})
 	}
 }
+
+// TestBootRestore proves FR-015/FR-016: the hub re-establishes the committed
+// selection and network identifier from the store on every start, without a
+// device being attached, and without any operator input. The driver is not
+// started until discovery reports the device; until then the API reports
+// awaiting_coordinator.
+func TestBootRestore(t *testing.T) {
+	dir := t.TempDir()
+
+	st1, err := store.Open(context.Background(), store.Options{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h1, err := New(st1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	done1 := make(chan struct{})
+	go func() { defer close(done1); h1.Run(ctx1) }()
+
+	dev := testDevice("ttyUSB0", "abc", "")
+	if err := h1.SyncDiscovery(context.Background(), []coordinator.Device{dev}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h1.Select(context.Background(), testSelection(dev.Identity.ID, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := h1.Adopt(context.Background(), dev.Identity.ID, Identified{Network: Network{HomeID: "0x00000001", NodeCount: 1}}); err != nil {
+		t.Fatal(err)
+	}
+
+	cancel1()
+	select {
+	case <-done1:
+	case <-time.After(testTimeout):
+		t.Fatal("the hub did not stop")
+	}
+	if err := st1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart: reopen the store and the hub, with no device attached and no API
+	// calls. The committed selection and the network identifier must already be
+	// there, read back from the database.
+	st2, err := store.Open(context.Background(), store.Options{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st2.Close() }()
+	h2, err := New(st2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan struct{})
+	go func() { defer close(done2); h2.Run(ctx2) }()
+	defer func() {
+		cancel2()
+		select {
+		case <-done2:
+		case <-time.After(testTimeout):
+			t.Fatal("the hub did not stop")
+		}
+	}()
+
+	snap := h2.Snapshot()
+	if snap.ActiveID != dev.Identity.ID {
+		t.Fatalf("active id after restart = %q, want %q", snap.ActiveID, dev.Identity.ID)
+	}
+	if snap.HomeID != "0x00000001" {
+		t.Fatalf("home id after restart = %q, want 0x00000001", snap.HomeID)
+	}
+	active, ok := snap.Coordinator(snap.ActiveID)
+	if !ok {
+		t.Fatal("the selected coordinator is missing after restart")
+	}
+	if active.Connection != ConnectionNotAttached {
+		t.Fatalf("connection after restart = %q, want not_attached (no driver started yet)", active.Connection)
+	}
+	if got, ok := snap.Restore(); ok {
+		t.Fatalf("Restore returned %q before the device is attached; want empty (awaiting_coordinator)", got.ID)
+	}
+
+	// The same identity returns at a different path: it is adopted without a
+	// second selection, and the selection stays on the same identity.
+	replugged := testDevice("ttyUSB0", "abc", "")
+	replugged.Path = "/dev/ttyUSB1"
+	replugged.PathKind = coordinator.PathTTY
+	if err := h2.SyncDiscovery(context.Background(), []coordinator.Device{replugged}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := h2.Snapshot().Restore()
+	if !ok || got.ID != dev.Identity.ID || got.Path != "/dev/ttyUSB1" {
+		t.Fatalf("Restore after re-plug = %+v, %t; want %q at /dev/ttyUSB1", got, ok, dev.Identity.ID)
+	}
+	if h2.Snapshot().ActiveID != dev.Identity.ID {
+		t.Fatalf("the selection changed on re-plug")
+	}
+}
+
+// TestAdoptionOnReplug proves FR-004/FR-016: a re-plugged coordinator with the
+// same identity is adopted at the new path without changing the selection, and an
+// unknown device that appears stays available without becoming the selection.
+func TestAdoptionOnReplug(t *testing.T) {
+	h, _ := newTestHub(t)
+
+	dev := testDevice("ttyUSB0", "abc", "")
+	if err := h.SyncDiscovery(context.Background(), []coordinator.Device{dev}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Select(context.Background(), testSelection(dev.Identity.ID, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Adopt(context.Background(), dev.Identity.ID, Identified{Network: Network{HomeID: "0x00000001", NodeCount: 1}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// An unknown device appears alongside the selected one: the selection stays,
+	// and the new device is listed as available.
+	stranger := testDevice("ttyUSB1", "zzz", "")
+	if err := h.SyncDiscovery(context.Background(), []coordinator.Device{dev, stranger}); err != nil {
+		t.Fatal(err)
+	}
+	if h.Snapshot().ActiveID != dev.Identity.ID {
+		t.Fatalf("an unknown device changed the selection to %q", h.Snapshot().ActiveID)
+	}
+	strangerView, ok := h.Snapshot().Coordinator(stranger.Identity.ID)
+	if !ok || !strangerView.Attached || !strangerView.Selectable {
+		t.Fatalf("the unknown device is not available: %+v (ok=%t)", strangerView, ok)
+	}
+
+	// The same identity returns at a new path: the selection is untouched and
+	// the path is refreshed, so the driver can be started against the new node.
+	replugged := dev
+	replugged.Path = "/dev/ttyUSB1"
+	replugged.PathKind = coordinator.PathTTY
+	if err := h.SyncDiscovery(context.Background(), []coordinator.Device{replugged, stranger}); err != nil {
+		t.Fatal(err)
+	}
+	if h.Snapshot().ActiveID != dev.Identity.ID {
+		t.Fatalf("the selection changed on re-plug")
+	}
+	view, _ := h.Snapshot().Coordinator(dev.Identity.ID)
+	if view.Path != "/dev/ttyUSB1" {
+		t.Fatalf("path not refreshed on re-plug: %q", view.Path)
+	}
+	if view.Attached == false {
+		t.Fatal("the re-plugged coordinator is not attached")
+	}
+}

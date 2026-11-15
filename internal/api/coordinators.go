@@ -69,12 +69,7 @@ func (c *Coordinators) getActiveCoordinator(w http.ResponseWriter, r *http.Reque
 }
 
 func findCoordinator(snap hub.Snapshot, id string) (hub.Coordinator, bool) {
-	for _, c := range snap.Coordinators {
-		if c.ID == id {
-			return c, true
-		}
-	}
-	return hub.Coordinator{}, false
+	return snap.Coordinator(id)
 }
 
 // selectRequest is the PUT body; unknown members are refused.

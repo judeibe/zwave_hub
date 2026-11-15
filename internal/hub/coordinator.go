@@ -112,6 +112,34 @@ type Snapshot struct {
 	KeyRevision int
 }
 
+// Coordinator returns the named coordinator of the snapshot and whether the
+// snapshot holds it. It is the one lookup of a coordinator by identity: the
+// hub, the API and the driver bridge all ask the same question.
+func (s Snapshot) Coordinator(id string) (Coordinator, bool) {
+	for _, c := range s.Coordinators {
+		if c.ID == id {
+			return c, true
+		}
+	}
+	return Coordinator{}, false
+}
+
+// Restore returns the coordinator the driver should run for this snapshot: the
+// committed selection, matched against the devices discovery has reported. It is
+// empty when nothing is selected or when the selected device is not attached,
+// which is the awaiting_coordinator the API reports (FR-015, FR-016).
+//
+// The selection is bound to the identity, never to a path, so a device that
+// returns — at the same path or at another one — is the same coordinator here
+// (FR-004). Nothing in this method changes the selection.
+func (s Snapshot) Restore() (Coordinator, bool) {
+	active, ok := s.Coordinator(s.ActiveID)
+	if !ok || !active.Attached || active.Support == coordinator.SupportUnsupported {
+		return Coordinator{}, false
+	}
+	return active, true
+}
+
 // SelectionCode is the machine-readable cause of a refused selection. The
 // values are the `code` of the coordinator.rejected event
 // (contracts/events.md §3.3) plus coordinator_not_found; the API maps them to
