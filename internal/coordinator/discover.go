@@ -33,6 +33,11 @@ type DiscoveryOptions struct {
 	Publish func(context.Context, []Device) error
 }
 
+// DefaultDebounce is how long a changed device set must stay unchanged before it
+// is published (research.md R14 §7). The deployment uses it; a test may set
+// its own.
+const DefaultDebounce = 300 * time.Millisecond
+
 // Discovery polls sysfs and publishes the attached USB serial devices it maps
 // to a /dev node. It owns no durable state: identity, support and the selection
 // live in the hub and the store, and this type only reports what the host

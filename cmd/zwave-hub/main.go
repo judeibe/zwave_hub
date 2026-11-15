@@ -36,10 +36,6 @@ const (
 	sysRoot = "/sys"
 	devRoot = "/dev"
 	runDir  = "/run/zwave-hub"
-
-	// discoveryDebounce is how long a changed device set must hold still before
-	// it is published (research.md R14 §7).
-	discoveryDebounce = 1 * time.Second
 )
 
 // shutdownTimeout bounds the drain of in-flight requests. The store is closed
@@ -120,8 +116,17 @@ func run() error {
 			SysRoot:  sysRoot,
 			DevRoot:  devRoot,
 			Interval: cfg.DiscoveryInterval,
-			Debounce: discoveryDebounce,
-			Publish:  h.SyncDiscovery,
+			Debounce: coordinator.DefaultDebounce,
+			Publish: func(ctx context.Context, devices []coordinator.Device) error {
+				if err := h.SyncDiscovery(ctx, devices); err != nil {
+					return err
+				}
+				// A settled change set is what resumes a paused driver
+				// (R14 §7); tell the bridge at once rather than waiting for
+				// its next tick.
+				bridge.deviceSetChanged()
+				return nil
+			},
 		})
 		if err != nil {
 			return err
