@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -123,6 +124,42 @@ func (e *KeyStoreCorruptError) Error() string {
 		"or reset the network and re-include the devices"
 }
 
+// CodeKeyInUse is the refusal code of a key change the network's securely
+// included devices make unsafe (FR-014). It is the `code` of the problem
+// response and the `reason` of the audit row the refusal writes.
+const CodeKeyInUse = "key_in_use"
+
+// KeyInUseError is a refused key change: one or more of the classes it would
+// replace already hold a key while the network holds securely included
+// devices. Replacing such a key strands every device that was included with
+// it, so the only supported path is a confirmed network reset (FR-017).
+//
+// The refusal writes nothing: it is a command that succeeds with outcome
+// rejected and leaves the stored key set exactly as it was (FR-014, FR-019).
+// It carries class names and a count only — never key material (FR-013).
+type KeyInUseError struct {
+	// Classes are the configured classes the change would have replaced, in
+	// canonical order. A class that was never configured is not among them:
+	// nothing is in use for it.
+	Classes []string
+	// SecureNodeCount is how many securely included devices the coordinator
+	// reported.
+	SecureNodeCount int
+}
+
+// Error names the classes, the count and the reset path, and nothing else:
+// the text may be shown to an operator, so it carries no key material.
+func (e *KeyInUseError) Error() string {
+	detail := "hub: key change refused (" + CodeKeyInUse + ")"
+	if len(e.Classes) > 0 {
+		detail += ": the classes " + strings.Join(e.Classes, ", ") + " are in use"
+	}
+	if e.SecureNodeCount > 0 {
+		detail += " by " + strconv.Itoa(e.SecureNodeCount) + " securely included devices"
+	}
+	return detail + ": reset the network (POST /api/v1/network/reset) before replacing them"
+}
+
 // The audit identity of the automatic first-activation generation. No client
 // requested it (FR-008), but every key change is audited (FR-019) and the row
 // has to say where the change came from; "hub" is the hub itself, not a client
@@ -156,10 +193,14 @@ func (r KeyGeneration) keyRequest() keyRequest {
 // sealed values are the only thing written — the plaintext is wiped as soon as
 // the sealing returns.
 //
+// A submission that would replace a key protecting an included device is
+// refused before anything is written (FR-014). A class the hub holds no key for
+// is not in use: supplying the matching keys of a network the hub has no keys
+// for is the FR-018 path, not a replacement.
+//
 // Nothing here looks at the coordinator's connection state. A submission while
 // the coordinator is faulted or absent is accepted and stored, and the response
-// says through Apply that it is not running yet (R14 §1, §3); the in-use gate
-// belongs to the reset work and is not applied yet.
+// says through Apply that it is not running yet (R14 §1, §3).
 func (h *Hub) SubmitKeys(ctx context.Context, req KeySubmission) (KeyConfiguration, error) {
 	mode := req.Mode
 	if mode == "" {
@@ -186,12 +227,15 @@ func (h *Hub) SubmitKeys(ctx context.Context, req KeySubmission) (KeyConfigurati
 			return KeyConfiguration{}, &ValidationError{Code: CodeInvalidKeyMaterial, Classes: missing}
 		}
 	}
+	reqID := req.keyRequest()
+	if err := h.refuseInUse(ctx, reqID, classes, mode == KeyModeReplace); err != nil {
+		return KeyConfiguration{}, err
+	}
 	blobs, err := h.sealKeys(classes, decoded)
 	if err != nil {
 		return KeyConfiguration{}, err
 	}
 
-	reqID := req.keyRequest()
 	state, err := h.commit(ctx, reqID, store.AuditKeysReplaced, keyChange{
 		classes: classes,
 		blobs:   blobs,
@@ -210,12 +254,19 @@ func (h *Hub) SubmitKeys(ctx context.Context, req KeySubmission) (KeyConfigurati
 // defaulting to the four classic classes. Generation over a store that cannot
 // authenticate a stored row is refused: the operator has to recover the set
 // first, because replacing it would strand every secure device (R14 §2).
+//
+// Like a submission, a generation that would replace a key protecting an
+// included device is refused (FR-014, FR-021).
 func (h *Hub) GenerateKeys(ctx context.Context, req KeyGeneration) (KeyConfiguration, error) {
 	classes, err := GenerateClasses(req.Classes)
 	if err != nil {
 		return KeyConfiguration{}, err
 	}
 	if err := h.refuseCorruptStore(ctx); err != nil {
+		return KeyConfiguration{}, err
+	}
+	reqID := req.keyRequest()
+	if err := h.refuseInUse(ctx, reqID, classes, false); err != nil {
 		return KeyConfiguration{}, err
 	}
 	values, err := GenerateKeys(classes)
@@ -228,7 +279,6 @@ func (h *Hub) GenerateKeys(ctx context.Context, req KeyGeneration) (KeyConfigura
 		return KeyConfiguration{}, err
 	}
 
-	reqID := req.keyRequest()
 	state, err := h.commit(ctx, reqID, store.AuditKeysGenerated, keyChange{
 		classes: classes,
 		blobs:   blobs,
@@ -240,6 +290,96 @@ func (h *Hub) GenerateKeys(ctx context.Context, req KeyGeneration) (KeyConfigura
 	h.emitKeys(ctx, reqID, state.keyRevision, classes, store.KeySourceGenerated)
 
 	return h.keyConfiguration(ctx, nil)
+}
+
+// refuseInUse applies the FR-014 gate: a change may not replace a key that
+// protects an included device, because the device was included with that value
+// and would be stranded. The refusal is a command that succeeds with outcome
+// rejected, so it leaves the key set, the revisions and the applied revision
+// exactly as they were and leaves one keys.rejected row naming the reason and
+// the classes (FR-019). It returns a *KeyInUseError for the refusal, whose
+// message names the reset, and a wrapped error only when the audit row itself
+// could not be written.
+//
+// The classes it refuses are the configured ones among those the change would
+// write: the named classes for a merge or a generation, and every configured
+// class for a replace, since a replace deletes the configured classes it does
+// not name. A class with no stored key is never refused — nothing is in use for
+// it, and supplying it is how a network the hub has no keys for gets its keys
+// (FR-018).
+func (h *Hub) refuseInUse(ctx context.Context, req keyRequest, classes []string, replace bool) error {
+	secureNodeCount := h.secureNodeCount()
+	if secureNodeCount == 0 {
+		return nil
+	}
+	stored, err := h.store.ListKeys(ctx)
+	if err != nil {
+		return fmt.Errorf("hub: read the configured keys: %w", err)
+	}
+	configured := make([]string, 0, len(stored))
+	for _, key := range stored {
+		configured = append(configured, key.SecurityClass)
+	}
+	refused := make([]string, 0, len(configured))
+	for _, class := range configured {
+		if replace || slices.Contains(classes, class) {
+			refused = append(refused, class)
+		}
+	}
+	refused = canonicalClasses(refused)
+	if len(refused) == 0 {
+		return nil
+	}
+
+	refusal := &KeyInUseError{Classes: refused, SecureNodeCount: secureNodeCount}
+	_, err = h.worker.Submit(ctx, Command[provisioning]{
+		Audit: store.AuditEntry{
+			Action:     store.AuditKeysRejected,
+			Outcome:    store.OutcomeRejected,
+			ActorAddr:  req.actorAddr,
+			ActorLabel: req.actorLabel,
+			RequestID:  req.requestID,
+			Detail: store.AuditDetail{
+				Reason:  CodeKeyInUse,
+				Classes: slices.Clone(refused),
+			},
+		},
+		// A refusal writes nothing: the command carries only its audit row.
+		Apply: func(ctx context.Context, tx *store.Tx) (provisioning, error) {
+			return committedIn(ctx, tx)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("hub: record the refused key change: %w", err)
+	}
+
+	if h.emitter != nil {
+		h.emitter.Emit(ctx, &event.KeysInUseRejected{
+			Classes:         refused,
+			SecureNodeCount: secureNodeCount,
+		}, event.Correlation{
+			RequestID:  req.requestID,
+			ActorAddr:  req.actorAddr,
+			ActorLabel: req.actorLabel,
+		})
+	}
+	return refusal
+}
+
+// secureNodeCount is how many securely included devices the selected
+// coordinator last reported. It is read from the overlay rather than from a
+// command, because the driver's report is what carries it and a submission does
+// not wait for the queue to tell it. A coordinator that has not reported yet, or
+// a snapshot with no network, counts zero: nothing can be protected by a key
+// the hub has not seen in use.
+func (h *Hub) secureNodeCount() int {
+	state := h.committedState()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if known, ok := h.known[state.activeID]; ok && known.overlay.network != nil {
+		return known.overlay.network.SecureNodeCount
+	}
+	return 0
 }
 
 // Keys returns the metadata view of the stored key set (FR-013). A row that
