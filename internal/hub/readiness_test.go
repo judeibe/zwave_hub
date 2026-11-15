@@ -2,6 +2,7 @@ package hub
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -485,5 +486,134 @@ func TestMissingClassicClassesEachOmission(t *testing.T) {
 				t.Errorf("MissingClassicClasses(%v) = %v, want exactly %v", configured, missing, want)
 			}
 		})
+	}
+}
+
+// TestDeriveNetworkState proves the five states of data-model.md §8.2 are
+// derived from the same input the readiness is derived from, so the state and
+// the readiness can never disagree about the same moment.
+func TestDeriveNetworkState(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*ReadinessInput)
+		want   NetworkState
+	}{
+		{
+			name:   "nothing selected",
+			mutate: func(in *ReadinessInput) { in.ActiveID = "" },
+			want:   NetworkUnprovisioned,
+		},
+		{
+			name: "no network on record",
+			mutate: func(in *ReadinessInput) {
+				in.HomeID = ""
+				in.ReportedHomeID = ""
+				in.KeyRevision = 0
+				in.AppliedRevision = nil
+				in.Configured = nil
+			},
+			want: NetworkUnprovisioned,
+		},
+		{
+			name: "the driver is faulted",
+			mutate: func(in *ReadinessInput) {
+				in.Connection = ConnectionFaulted
+				in.FaultReason = "permission_denied"
+			},
+			want: NetworkFaulted,
+		},
+		{
+			name:   "the key store is corrupt",
+			mutate: func(in *ReadinessInput) { in.KeyStore = KeyStoreCorrupt },
+			want:   NetworkFaulted,
+		},
+		{
+			name: "an unknown network is detected",
+			mutate: func(in *ReadinessInput) {
+				in.HomeID = ""
+				in.ReportedHomeID = "0xfeedface"
+				in.KeyRevision = 0
+				in.AppliedRevision = nil
+				in.Configured = nil
+			},
+			want: NetworkFaulted,
+		},
+		{
+			name: "the coordinator is not ready yet",
+			mutate: func(in *ReadinessInput) {
+				in.Connection = ConnectionConnecting
+				in.Attached = true
+			},
+			want: NetworkAwaitingCoordinator,
+		},
+		{
+			name:   "ready for secure inclusion",
+			mutate: func(*ReadinessInput) {},
+			want:   NetworkReady,
+		},
+		{
+			name: "ready but the keys are missing",
+			mutate: func(in *ReadinessInput) {
+				in.Configured = []string{"S2_AccessControl"}
+			},
+			want: NetworkDegraded,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := readyInput()
+			tt.mutate(&in)
+			readiness := mustDeriveReadiness(t, in)
+			if got := DeriveNetworkState(in, readiness); got != tt.want {
+				t.Errorf("DeriveNetworkState = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// reasonWith returns the emitted reason with code, failing when it is absent.
+func reasonWith(t *testing.T, got Readiness, code BlockingCode) BlockingReason {
+	t.Helper()
+	for _, reason := range got.BlockingReasons {
+		if reason.Code == code {
+			return reason
+		}
+	}
+	t.Fatalf("got blocking reasons %v, want one of them to be %s", blockingCodes(got.BlockingReasons), code)
+	return BlockingReason{}
+}
+
+// TestExistingNetworkReportsBothPaths proves the FR-018 reason names the
+// network, its size and both paths the operator has: supplying the matching
+// keys or a confirmed reset. The hub does neither on its own. A network found
+// this way has no classic keys either, so keys_missing follows it; the FR-018
+// reason is the one to act on, and it comes first.
+func TestExistingNetworkReportsBothPaths(t *testing.T) {
+	in := readyInput()
+	in.HomeID = ""
+	in.ReportedHomeID = "0xfeedface"
+	in.KeyRevision = 0
+	in.AppliedRevision = nil
+	in.Configured = nil
+	in.NodeCount = 4
+
+	readiness := mustDeriveReadiness(t, in)
+	if got := blockingCodes(readiness.BlockingReasons)[0]; got != BlockingExistingNetworkDetected {
+		t.Fatalf("first blocking reason is %s, want %s", got, BlockingExistingNetworkDetected)
+	}
+	reason := reasonWith(t, readiness, BlockingExistingNetworkDetected)
+
+	if reason.HomeID != "0xfeedface" {
+		t.Errorf("existing_network_detected reports home id %q, want the reported %q", reason.HomeID, "0xfeedface")
+	}
+	if reason.NodeCount != 4 {
+		t.Errorf("existing_network_detected reports %d nodes, want 4", reason.NodeCount)
+	}
+	if !strings.Contains(reason.Message, "matching keys") {
+		t.Errorf("existing_network_detected does not offer supplying the matching keys: %q", reason.Message)
+	}
+	if !strings.Contains(reason.Message, "reset") {
+		t.Errorf("existing_network_detected does not offer a confirmed reset: %q", reason.Message)
 	}
 }

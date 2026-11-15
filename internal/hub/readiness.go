@@ -1,6 +1,36 @@
 package hub
 
-import "slices"
+import (
+	"context"
+	"fmt"
+	"slices"
+
+	"github.com/judeibe/zwave_hub/internal/event"
+)
+
+// NetworkState is the state of the network (data-model.md §8.2). It is a
+// separate value from the readiness derivation: the readiness says whether a
+// securely included device may join, while the state says what the hub is,
+// and a hub with a faulted driver is faulted whatever its readiness says.
+type NetworkState string
+
+const (
+	// NetworkUnprovisioned means the hub has nothing provisioned: no
+	// coordinator is selected, or no network is on record at all.
+	NetworkUnprovisioned NetworkState = "unprovisioned"
+	// NetworkAwaitingCoordinator means a coordinator is selected but its
+	// driver is not ready.
+	NetworkAwaitingCoordinator NetworkState = "awaiting_coordinator"
+	// NetworkDegraded means the coordinator is ready but the network is not
+	// ready for secure inclusion.
+	NetworkDegraded NetworkState = "degraded"
+	// NetworkReady means the coordinator is ready and the network accepts a
+	// securely included device.
+	NetworkReady NetworkState = "ready"
+	// NetworkFaulted means the driver is faulted, the key store is corrupt, or
+	// an unknown pre-existing network was detected.
+	NetworkFaulted NetworkState = "faulted"
+)
 
 // KeyStoreState is the health of the encrypted key store (data-model.md §3).
 // It is judged as a whole: one blob that fails authentication makes the set
@@ -176,15 +206,11 @@ func DeriveReadiness(in ReadinessInput) Readiness {
 	// revision has ever been committed: generating keys for it would mean
 	// nothing to its devices, and adopting it would hide the other network
 	// instead of reporting it (FR-018, R15).
-	homeID := in.HomeID
-	if homeID == "" {
-		homeID = in.ReportedHomeID
-	}
-	if in.KeyRevision == 0 && in.NodeCount > 0 && homeID != "" {
+	if DetectExistingNetwork(in) {
 		reasons = append(reasons, BlockingReason{
 			Code:      BlockingExistingNetworkDetected,
-			Message:   "The coordinator carries an existing network the hub has no keys for.",
-			HomeID:    homeID,
+			Message:   existingNetworkMessage,
+			HomeID:    existingNetworkHomeID(in),
 			NodeCount: in.NodeCount,
 		})
 	}
@@ -217,6 +243,165 @@ func keysInEffect(revision int, applied *int) bool {
 		return revision == 0
 	}
 	return *applied == revision
+}
+
+// existingNetworkMessage names both paths FR-018 leaves open, because the
+// reader of the refusal is the one who has to choose: supplying the matching
+// keys of that network, or performing a confirmed reset. The hub does neither
+// on its own.
+const existingNetworkMessage = "The coordinator carries an existing network the hub has no keys for: " +
+	"supply the matching keys or perform a confirmed reset."
+
+// DetectExistingNetwork reports whether the coordinator carries a network the
+// hub has no record of: nodes on a controller while no key revision has ever
+// been committed (FR-018, R14 §10). Such a network is reported and never
+// overwritten: keys are not generated over it and it is not reset.
+func DetectExistingNetwork(in ReadinessInput) bool {
+	return in.KeyRevision == 0 && in.NodeCount > 0 && existingNetworkHomeID(in) != ""
+}
+
+// existingNetworkHomeID is the identifier of that network: the one the hub
+// committed, or the one the coordinator reported when the hub has none on
+// record, which is the case R14 §10 describes.
+func existingNetworkHomeID(in ReadinessInput) string {
+	if in.HomeID != "" {
+		return in.HomeID
+	}
+	return in.ReportedHomeID
+}
+
+// DeriveNetworkState derives the network state of data-model.md §8.2 from the
+// readiness input and the readiness it produced.
+//
+// The faulted conditions come first: a faulted driver, a corrupt key store and
+// a detected pre-existing network are all states the operator has to act on,
+// and none of them is hidden by a state that only says "nothing is provisioned
+// yet".
+func DeriveNetworkState(in ReadinessInput, readiness Readiness) NetworkState {
+	switch {
+	case in.Connection == ConnectionFaulted:
+		return NetworkFaulted
+	case in.KeyStore == KeyStoreCorrupt:
+		return NetworkFaulted
+	case DetectExistingNetwork(in):
+		return NetworkFaulted
+	case in.ActiveID == "":
+		return NetworkUnprovisioned
+	case in.HomeID == "" && in.KeyRevision == 0:
+		return NetworkUnprovisioned
+	case in.Connection != ConnectionReady:
+		return NetworkAwaitingCoordinator
+	case readiness.Ready:
+		return NetworkReady
+	default:
+		return NetworkDegraded
+	}
+}
+
+// NetworkStatus is the hub's view of the network: the derived state, the
+// readiness derivation behind it and the key metadata both are read from
+// (data-model.md §8.2). It holds no key material, only the metadata of the
+// stored set.
+type NetworkStatus struct {
+	// State is the network state of data-model.md §8.2.
+	State NetworkState
+	// Readiness is the derivation of data-model.md §8.3, with the blocking
+	// reasons in their fixed order.
+	Readiness Readiness
+	// Keys is the metadata view of the stored key set.
+	Keys KeyConfiguration
+	// KeyStore is the health of the stored keys and CorruptClasses the
+	// classes whose blob failed authentication.
+	KeyStore       KeyStoreState
+	CorruptClasses []string
+	// ActiveID is the selected coordinator, empty when none is selected.
+	ActiveID string
+	// HomeID is the network identifier on record.
+	HomeID string
+	// NodeCount and SecureNodeCount are what the driver last reported for the
+	// selected coordinator.
+	NodeCount       int
+	SecureNodeCount int
+	// Connection is what the driver last reported and LastError the cause of
+	// the latest failed start.
+	Connection Connection
+	LastError  *LastError
+}
+
+// NetworkStatus derives the network status. It reads the committed state, the
+// overlay and the key store, so the state, the readiness and the key metadata
+// describe the same moment.
+func (h *Hub) NetworkStatus(ctx context.Context) (NetworkStatus, error) {
+	snap := h.Snapshot()
+	status := NetworkStatus{State: NetworkUnprovisioned, ActiveID: snap.ActiveID, HomeID: snap.HomeID}
+
+	corrupt, err := h.store.CheckKeys(ctx)
+	if err != nil {
+		return NetworkStatus{}, fmt.Errorf("hub: read the key store: %w", err)
+	}
+	keys, err := h.keyConfiguration(ctx, nil)
+	if err != nil {
+		return NetworkStatus{}, err
+	}
+	configured := make([]string, 0, len(keys.Classes))
+	for _, class := range keys.Classes {
+		if class.Configured {
+			configured = append(configured, class.Class)
+		}
+	}
+
+	in := ReadinessInput{
+		KeyStore:        KeyStoreOK,
+		CorruptClasses:  canonicalClasses(corrupt),
+		ActiveID:        snap.ActiveID,
+		HomeID:          snap.HomeID,
+		KeyRevision:     keys.Revision,
+		AppliedRevision: keys.AppliedRevision,
+		Configured:      configured,
+	}
+	if len(corrupt) > 0 {
+		in.KeyStore = KeyStoreCorrupt
+	}
+	if active, found := snap.Coordinator(snap.ActiveID); found {
+		in.Attached = active.Attached
+		in.Connection = active.Connection
+		in.LastPath = active.LastPath
+		if active.LastError != nil {
+			in.FaultReason = active.LastError.Code
+		}
+		if active.Network != nil {
+			in.ReportedHomeID = active.Network.HomeID
+			in.NodeCount = active.Network.NodeCount
+			status.NodeCount = active.Network.NodeCount
+			status.SecureNodeCount = active.Network.SecureNodeCount
+		}
+		status.Connection = active.Connection
+		status.LastError = active.LastError
+	}
+
+	status.Readiness = DeriveReadiness(in)
+	status.State = DeriveNetworkState(in, status.Readiness)
+	status.Keys = keys
+	status.KeyStore = in.KeyStore
+	status.CorruptClasses = in.CorruptClasses
+	return status, nil
+}
+
+// reportExistingNetwork emits network.existing_detected for a coordinator that
+// carries a network the hub has no keys for (FR-018, R14 §10). The hub never
+// resets or overwrites such a network on its own: the two permitted paths are
+// supplying the matching keys and a confirmed reset, and both are operator
+// actions.
+func (h *Hub) reportExistingNetwork(ctx context.Context, id string, network Network) {
+	if h.emitter == nil || network.NodeCount == 0 {
+		return
+	}
+	state := h.committedState()
+	if state.activeID != id || state.keyRevision != 0 {
+		return
+	}
+	h.emitter.Emit(ctx, &event.NetworkExistingDetected{NodeCount: network.NodeCount},
+		event.Correlation{CoordinatorID: id, HomeID: network.HomeID})
 }
 
 // ClassicComplete reports whether configured holds every classic class,

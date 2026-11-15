@@ -56,6 +56,9 @@ const (
 	AuditKeysReplaced AuditAction = "keys.replaced"
 	// AuditKeysGenerated records committed generated keys.
 	AuditKeysGenerated AuditAction = "keys.generated"
+	// AuditKeysRejected records a refused key change: a class in use by
+	// securely included devices, or a validation failure (FR-014, FR-019).
+	AuditKeysRejected AuditAction = "keys.rejected"
 	// AuditKeysApplyFailed records a revision the driver did not come back with.
 	AuditKeysApplyFailed AuditAction = "keys.apply_failed"
 	// AuditKeysExportRequested records an issued export confirmation token.
@@ -66,6 +69,9 @@ const (
 	AuditKeysExportRejected AuditAction = "keys.export_rejected"
 	// AuditNetworkResetRequested records an issued reset confirmation token.
 	AuditNetworkResetRequested AuditAction = "network.reset_requested"
+	// AuditNetworkResetRejected records a reset presented with a bad, expired
+	// or consumed token.
+	AuditNetworkResetRejected AuditAction = "network.reset_rejected"
 	// AuditNetworkReset records a completed reset.
 	AuditNetworkReset AuditAction = "network.reset"
 	// AuditNetworkResetFailed records a reset the driver could not finish.
@@ -113,7 +119,7 @@ type AuditEntry struct {
 	// At is when the change was recorded. A zero At means now; the store
 	// truncates it to milliseconds and writes it as RFC 3339 UTC.
 	At time.Time
-	// Action is one of the eleven defined actions.
+	// Action is one of the defined actions.
 	Action AuditAction
 	// ActorAddr is the requesting client's network address, port stripped. It
 	// is recorded, not authenticated.
@@ -170,7 +176,8 @@ func auditOutcome(action AuditAction) (AuditOutcome, bool) {
 		AuditKeysExportRequested, AuditKeysExported, AuditNetworkResetRequested,
 		AuditNetworkReset:
 		return OutcomeSucceeded, true
-	case AuditCoordinatorRejected, AuditKeysExportRejected:
+	case AuditCoordinatorRejected, AuditKeysRejected, AuditKeysExportRejected,
+		AuditNetworkResetRejected:
 		return OutcomeRejected, true
 	case AuditKeysApplyFailed, AuditNetworkResetFailed:
 		return OutcomeFailed, true

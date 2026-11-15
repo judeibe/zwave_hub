@@ -282,6 +282,12 @@ type Hub struct {
 	// poll writing the read model.
 	mu    sync.RWMutex
 	known map[string]*knownCoordinator
+
+	// driverMu guards driver, the driver a network reset runs through. It
+	// is bound after the hub is built, because the driver's report callback
+	// needs the hub and the two cannot be built in one expression.
+	driverMu sync.RWMutex
+	driver   NetworkDriver
 }
 
 // selectionAttempts bounds how often Select rebuilds its decision when a
@@ -726,6 +732,8 @@ func (h *Hub) SetConnection(ctx context.Context, id string, conn Connection, net
 	if err != nil {
 		return fmt.Errorf("hub: record the network of %s: %w", id, err)
 	}
+	// A network the hub has no keys for is reported, never adopted (FR-018).
+	h.reportExistingNetwork(ctx, id, *held)
 	if err := h.generateOnActivation(ctx, id, held.NodeCount); err != nil {
 		return fmt.Errorf("hub: generate the first-activation keys of %s: %w", id, err)
 	}
