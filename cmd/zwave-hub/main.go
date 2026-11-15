@@ -103,6 +103,11 @@ func run() error {
 		return err
 	}
 	bridge.attach(sup)
+	// The reset orchestration runs through the same live child the reports
+	// come from. The binding is set here because the supervisor needs the
+	// bridge as its report callback, so the two cannot be built in one
+	// expression (constitution III: everything is injected, nothing global).
+	h.SetNetworkDriver(bridge)
 
 	background.Add(1)
 	go func() { defer background.Done(); bridge.run(ctx) }()

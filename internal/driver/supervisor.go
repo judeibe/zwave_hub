@@ -91,6 +91,9 @@ type Supervisor struct {
 	cancel  context.CancelFunc
 	stopped chan struct{}
 	lines   []string
+	// client is the connection of the ready child, nil until one is ready and
+	// again once it ends. It is what a reset runs through.
+	client *Client
 }
 
 // NewSupervisor validates opts.
@@ -172,6 +175,54 @@ func (s *Supervisor) Current() (Target, bool) {
 		return Target{}, false
 	}
 	return *s.target, true
+}
+
+// HardReset asks the live driver to wipe the controller's network
+// configuration. A nil error means the request was accepted, never that the
+// reset happened: the caller confirms it with ControllerState
+// (contracts/zwave-server-sidecar.md §6). With no ready child there is nothing
+// to ask, which is ErrClosed: the same answer a call on a closed connection
+// gets.
+func (s *Supervisor) HardReset(ctx context.Context) error {
+	c := s.liveClient()
+	if c == nil {
+		return ErrClosed
+	}
+	return c.HardReset(ctx)
+}
+
+// ControllerState re-reads the live driver's state. It is the poll a reset
+// waits on, so it answers ErrClosed exactly when HardReset would.
+func (s *Supervisor) ControllerState(ctx context.Context) (State, error) {
+	c := s.liveClient()
+	if c == nil {
+		return State{}, ErrClosed
+	}
+	return c.ControllerState(ctx)
+}
+
+// setClient binds the ready child's connection.
+func (s *Supervisor) setClient(c *Client) {
+	s.mu.Lock()
+	s.client = c
+	s.mu.Unlock()
+}
+
+// clearClient unbinds c, leaving a newer child's connection in place: an old
+// runOnce finishing after a restart must not unhook the new one.
+func (s *Supervisor) clearClient(c *Client) {
+	s.mu.Lock()
+	if s.client == c {
+		s.client = nil
+	}
+	s.mu.Unlock()
+}
+
+// liveClient is the ready child's connection, or nil while none is ready.
+func (s *Supervisor) liveClient() *Client {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.client
 }
 
 func (s *Supervisor) run(ctx context.Context, target Target) {
@@ -282,6 +333,12 @@ func (s *Supervisor) runOnce(ctx context.Context, target Target, attempt int) er
 			NodeCount: state.NodeCount, SecureNodeCount: state.SecureNodeCount,
 		}, corr)
 	}
+	// The client is bound before the ready report, so a caller that hears
+	// "ready" can call HardReset and ControllerState straight away, and
+	// unbound before the socket closes, so a call in flight fails as closed
+	// rather than on a closing socket.
+	s.setClient(client)
+	defer s.clearClient(client)
 	s.report(ctx, Report{CoordinatorID: target.CoordinatorID, Connection: ConnectionReady, State: &state, SchemaVersion: client.Schema})
 
 	select {

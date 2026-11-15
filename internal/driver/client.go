@@ -299,6 +299,29 @@ func (c *Client) Call(ctx context.Context, command string, args map[string]any) 
 	}
 }
 
+// HardReset asks the driver to wipe the controller's network configuration
+// (contracts/zwave-server-sidecar.md §6). The result says only that the request
+// was accepted: the server schedules the reset for its next tick and never
+// forwards the completion to WebSocket clients, so this returns as soon as the
+// result frame arrives and a nil error is no evidence that the reset happened.
+// Completion is what ControllerState confirms.
+func (c *Client) HardReset(ctx context.Context) error {
+	_, err := c.Call(ctx, "driver.hard_reset", nil)
+	return err
+}
+
+// ControllerState re-reads the state the hub polls while it waits for a reset
+// to complete: the same {driver, controller, nodes} object start_listening
+// returns, decoded by ParseState. A controller with no home ID and no nodes is
+// the reset's post-condition.
+func (c *Client) ControllerState(ctx context.Context) (State, error) {
+	raw, err := c.Call(ctx, "controller.get_state", nil)
+	if err != nil {
+		return State{}, err
+	}
+	return ParseState(raw)
+}
+
 // Events delivers consumed events (node/added, node/removed, node/ready). It
 // is closed when the connection ends; a slow reader drops events rather than
 // stalling the read loop, which is safe because the supervisor re-reads state

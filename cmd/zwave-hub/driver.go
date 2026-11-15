@@ -111,6 +111,34 @@ func (b *driverBridge) stop() {
 	}
 }
 
+// HardReset and ControllerState make the bridge the hub's network driver: the
+// reset orchestration in internal/hub asks the bridge, the bridge asks the
+// supervisor, and the supervisor asks the child that is running now. Neither
+// package imports the other, so the adapter lives here.
+func (b *driverBridge) HardReset(ctx context.Context) error {
+	if b.sup == nil {
+		return driver.ErrClosed
+	}
+	return b.sup.HardReset(ctx)
+}
+
+// ControllerState reports the live driver's network. The reset reads it until
+// the controller carries no home ID and no nodes.
+func (b *driverBridge) ControllerState(ctx context.Context) (hub.Network, error) {
+	if b.sup == nil {
+		return hub.Network{}, driver.ErrClosed
+	}
+	state, err := b.sup.ControllerState(ctx)
+	if err != nil {
+		return hub.Network{}, err
+	}
+	return hub.Network{
+		HomeID:          state.HomeID,
+		NodeCount:       state.NodeCount,
+		SecureNodeCount: state.SecureNodeCount,
+	}, nil
+}
+
 // report maps a supervisor report to hub state.
 func (b *driverBridge) report(ctx context.Context, r driver.Report) {
 	switch r.Connection {
