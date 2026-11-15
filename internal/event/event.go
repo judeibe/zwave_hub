@@ -644,6 +644,12 @@ func (e *DriverLog) attrs() []slog.Attr {
 	return []slog.Attr{slog.String("line", capLine(e.Line))}
 }
 
+// IsSecret reports whether a child output line must not be retained or
+// emitted at all (events.md §3.4). It is the one redaction rule of the event
+// package, exported so the supervisor can apply it to the in-memory ring it
+// keeps for diagnostics, rather than only to the emitted event.
+func IsSecret(line string) bool { return looksSecret(line) }
+
 // looksSecret reports whether a child line must not be emitted at all.
 func looksSecret(line string) bool {
 	if hasHexRun(line) {

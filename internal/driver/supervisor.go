@@ -136,6 +136,21 @@ func (s *Supervisor) Start(ctx context.Context, target Target) {
 	}()
 }
 
+// Resume restarts the supervision loop of the current target without changing
+// it. It is what a settled device-set change calls: the same device may work now
+// that it has been plugged back in or re-enumerated, and retrying is paused
+// until exactly that (R14 §8). It is a no-op when no target is being run, so a
+// stray notification cannot start a driver for nothing.
+func (s *Supervisor) Resume(ctx context.Context) {
+	s.mu.Lock()
+	target := s.target
+	s.mu.Unlock()
+	if target == nil {
+		return
+	}
+	s.Start(ctx, *target)
+}
+
 // Stop ends the current child and waits until it has exited. It is idempotent.
 func (s *Supervisor) Stop() {
 	s.mu.Lock()
@@ -162,7 +177,7 @@ func (s *Supervisor) Current() (Target, bool) {
 func (s *Supervisor) run(ctx context.Context, target Target) {
 	failures := 0
 	for attempt := 1; ctx.Err() == nil; attempt++ {
-		s.report(ctx, Report{CoordinatorID: target.CoordinatorID, Connection: "connecting"})
+		s.report(ctx, Report{CoordinatorID: target.CoordinatorID, Connection: ConnectionConnecting})
 		began := time.Now()
 		err := s.runOnce(ctx, target, attempt)
 		if ctx.Err() != nil {
@@ -171,9 +186,9 @@ func (s *Supervisor) run(ctx context.Context, target Target) {
 		failures++
 		last := &LastError{Code: errorCode(err), Message: errorMessage(err), At: time.Now()}
 		var next *time.Time
-		connection := "retrying"
+		connection := ConnectionRetrying
 		if failures >= MaxConsecutiveFailures {
-			connection = "faulted"
+			connection = ConnectionFaulted
 		} else {
 			t := time.Now().Add(s.opts.Backoff(failures))
 			next = &t
@@ -183,14 +198,14 @@ func (s *Supervisor) run(ctx context.Context, target Target) {
 				Attempt: attempt, Reason: eventReason(err),
 				DurationMS: time.Since(began).Milliseconds(), NextRetryAt: next,
 			}, event.Correlation{CoordinatorID: target.CoordinatorID})
-			if connection == "faulted" {
+			if connection == ConnectionFaulted {
 				s.opts.Emitter.Emit(ctx, &event.DriverRestartPaused{
 					ConsecutiveFailures: failures, Since: time.Now(),
 				}, event.Correlation{CoordinatorID: target.CoordinatorID})
 			}
 		}
 		s.report(ctx, Report{CoordinatorID: target.CoordinatorID, Connection: connection, LastError: last, NextRetryAt: next})
-		if connection == "faulted" {
+		if connection == ConnectionFaulted {
 			return
 		}
 		if !sleep(ctx, time.Until(*next)) {
@@ -267,7 +282,7 @@ func (s *Supervisor) runOnce(ctx context.Context, target Target, attempt int) er
 			NodeCount: state.NodeCount, SecureNodeCount: state.SecureNodeCount,
 		}, corr)
 	}
-	s.report(ctx, Report{CoordinatorID: target.CoordinatorID, Connection: "ready", State: &state, SchemaVersion: client.Schema})
+	s.report(ctx, Report{CoordinatorID: target.CoordinatorID, Connection: ConnectionReady, State: &state, SchemaVersion: client.Schema})
 
 	select {
 	case <-ctx.Done():
@@ -344,8 +359,6 @@ func errorCode(err error) string {
 	}
 }
 
-// errorMessage is a fixed sentence per code: child output can name paths, and a
-// last-error field must never carry a log line.
 // eventReason maps a failure to the closed driver.failed reason set of
 // contracts/events.md §3.4. The API's last-error code is separate: it names the
 // cause for an operator, this names the phase for a log reader.
@@ -364,6 +377,8 @@ func eventReason(err error) string {
 	}
 }
 
+// errorMessage is a fixed sentence per code: child output can name paths, and a
+// last-error field must never carry a log line.
 func errorMessage(err error) string {
 	switch errorCode(err) {
 	case "driver_protocol_unsupported":
@@ -425,6 +440,12 @@ func (s *Supervisor) forwardLogs(ctx context.Context, r io.Reader, target Target
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for scanner.Scan() {
 		line := strings.TrimRight(scanner.Text(), "\r")
+		// A line that looks like key material is dropped entirely rather
+		// than masked: it is neither retained in the ring nor emitted, so
+		// nothing downstream can recover it (events.md §3.4, R14 §8).
+		if event.IsSecret(line) {
+			continue
+		}
 		s.mu.Lock()
 		s.lines = append(s.lines, line)
 		if len(s.lines) > maxRetainedLines {
