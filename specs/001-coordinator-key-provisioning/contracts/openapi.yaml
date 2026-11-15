@@ -1,0 +1,968 @@
+openapi: 3.1.0
+info:
+  title: Z-Wave Hub Coordinator and Key Provisioning API
+  version: 1.0.0
+  summary: Discover and select a USB Z-Wave coordinator, manage network security keys, and read readiness.
+  description: |
+    The hub exposes one versioned JSON API under `/api/v1`.
+
+    **No authentication.** Every client that can reach the API on the local network may list,
+    select and configure the coordinator (FR-020). Network isolation is the security boundary and
+    is the operator's responsibility; the hub implements no authentication, sessions or access
+    tokens.
+
+    **Conventions**
+    - Request and response bodies are `application/json`.
+    - Every error is `application/problem+json` (RFC 9457) with a stable machine-readable `code`.
+    - `X-Request-Id` may be supplied by the client; when absent the hub generates one. It is
+      echoed in the response header and in the `request_id` field of every error, and it appears
+      in the audit row and in the structured events for the same request.
+    - `X-Actor-Label` is an optional, self-declared client label of 1-64 printable characters. It
+      is recorded in the audit trail as unverified (FR-019) and is never used for authorization.
+    - Timestamps are RFC 3339 UTC with millisecond precision.
+    - Home identifiers are strings of the form `0x` followed by eight lowercase hex digits.
+    - Key values are returned only by the confirmed backup export. No other response, error, log
+      record or audit entry contains them (FR-013).
+    - All mutating endpoints are serialized in arrival order by the hub (FR-021). Two concurrent
+      submissions both receive a response; where they touch the same security class, the later one
+      wins, and both outcomes are audited.
+
+    **Confirmation.** The backup export and the network reset are two-step. A request without
+    `confirm_token` returns `202` with a short-lived token and applies nothing. Repeating the
+    request with that token performs the operation and is audited. An unknown token is `404`; an
+    expired or already-consumed token is `410`. Tokens are bound to the operation and to the
+    requesting address.
+servers:
+  - url: http://localhost:8080
+    description: Default deployment. The API is unauthenticated and reachable on the local network.
+tags:
+  - name: Health
+    description: Liveness and API readiness. Never depends on Z-Wave hardware.
+  - name: Coordinators
+    description: Discovery, selection and connection status (FR-001 to FR-006, FR-018).
+  - name: Keys
+    description: Security key provisioning, metadata and backup export (FR-007 to FR-014).
+  - name: Network
+    description: Overall provisioning state, readiness and reset (FR-008, FR-017).
+  - name: Audit
+    description: Durable record of configuration changes (FR-019).
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Liveness
+      description: Returns 200 whenever the process is running. Used by the container health check.
+      responses:
+        "200":
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: getReady
+      summary: API readiness
+      description: |
+        Returns 200 when the hub can serve API requests: the database is open, migrations have been
+        applied, and the command worker is running. It deliberately does not depend on a coordinator
+        being attached (SC-008).
+      responses:
+        "200":
+          description: The API is ready.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ready
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/v1/coordinators:
+    get:
+      tags: [Coordinators]
+      operationId: listCoordinators
+      summary: List detected coordinators
+      description: |
+        Every USB serial device currently visible to the hub, whether or not it is supported, plus
+        the selected coordinator even when it is not attached. A device the host has but the
+        container cannot see is reported with `support_reason: not_passed_through` (FR-006).
+      responses:
+        "200":
+          description: The detected coordinators.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Coordinator"
+                  active_coordinator_id:
+                    type: [string, "null"]
+
+  /api/v1/coordinators/{coordinator_id}:
+    get:
+      tags: [Coordinators]
+      operationId: getCoordinator
+      summary: Get one coordinator
+      parameters:
+        - $ref: "#/components/parameters/CoordinatorId"
+      responses:
+        "200":
+          description: The coordinator.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Coordinator"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/active-coordinator:
+    get:
+      tags: [Coordinators]
+      operationId: getActiveCoordinator
+      summary: Get the selected coordinator
+      responses:
+        "200":
+          description: The active coordinator, including connection status and network membership.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Coordinator"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Coordinators]
+      operationId: selectCoordinator
+      summary: Select the active coordinator
+      description: |
+        Designates one detected coordinator as active and starts the driver for it (FR-003).
+
+        - An `unsupported` device is rejected with `409 coordinator_unsupported`.
+        - An `unverified` device is accepted and identified during activation; the response carries
+          the final `support` verdict.
+        - When the hub's network contains securely included devices, the replacement is accepted
+          only if it reports the same home ID as the stored provisioning record; otherwise it is
+          rejected with `409 coordinator_network_mismatch` and the reset path is named in `detail`.
+        - Selecting the already-active coordinator is idempotent and returns the current state.
+
+        The selection is bound to the device identity, not its connection path, so re-plugging the
+        same device at a different `/dev` path does not change the selection (FR-004).
+      parameters:
+        - $ref: "#/components/parameters/ActorLabel"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [coordinator_id]
+              properties:
+                coordinator_id:
+                  type: string
+                  examples: ["usb:10c4:ea60:00a1b2c3"]
+      responses:
+        "200":
+          description: The coordinator is now active.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Coordinator"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/v1/network:
+    get:
+      tags: [Network]
+      operationId: getNetworkStatus
+      summary: Get overall provisioning state and readiness
+      description: |
+        The single read a client needs to answer "is this hub ready for secure device inclusion?".
+        `blocking_reasons` is never empty when `ready_for_secure_inclusion` is false, and each
+        reason carries the fields needed to act on it.
+      responses:
+        "200":
+          description: The current network status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkStatus"
+
+  /api/v1/keys:
+    get:
+      tags: [Keys]
+      operationId: getKeyConfiguration
+      summary: Read key metadata
+      description: |
+        Returns per-class metadata only: configured or not, source, and when it last changed. Key
+        values are never included (FR-013).
+      responses:
+        "200":
+          description: Key metadata for all six classes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyConfiguration"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    put:
+      tags: [Keys]
+      operationId: submitKeys
+      summary: Submit key values
+      description: |
+        Sets one or more class keys (FR-009).
+
+        - `mode: merge` (default) changes only the classes present in `keys` and leaves every other
+          class untouched. This is how a single class is replaced.
+        - `mode: replace` requires all four classic classes to be present and removes any configured
+          class that is not listed.
+
+        Validation is all-or-nothing (FR-011): a value that is not exactly 32 hex characters, or a
+        value repeated within the classic set or within the Long Range set, rejects the whole
+        submission with `422` and leaves the stored configuration exactly as it was. The response
+        names the offending class, or both classes for a duplicate.
+
+        While the network contains securely included devices, replacing or generating a key that is
+        in use is rejected with `409 key_in_use` and the reset path is named (FR-014).
+
+        The change is committed first and then applied to the running driver. The call returns when
+        the outcome is known: `200` with `in_effect: true` when the driver is running with the new
+        revision, or `200` with `in_effect: false` and an `apply` block explaining why when it is
+        stored but not yet in effect (no coordinator, coordinator faulted, or driver restart
+        failed). A `200` therefore always means the stored configuration changed.
+      parameters:
+        - $ref: "#/components/parameters/ActorLabel"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KeySubmission"
+      responses:
+        "200":
+          description: The submission was accepted and stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyConfiguration"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/v1/keys/generate:
+    post:
+      tags: [Keys]
+      operationId: generateKeys
+      summary: Generate keys
+      description: |
+        Generates cryptographically strong values for the requested classes and applies them like a
+        submission (FR-010). With `classes` omitted the four classic classes are generated. Long
+        Range classes are never generated implicitly; they must be named explicitly (FR-008).
+
+        Generation is refused with `409 key_in_use` for any requested class that is in use on a
+        network containing securely included devices (FR-014). A class that already has a key is
+        replaced only if it is not in use.
+      parameters:
+        - $ref: "#/components/parameters/ActorLabel"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                classes:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  items:
+                    $ref: "#/components/schemas/SecurityClass"
+                  description: Defaults to the four classic classes when omitted.
+      responses:
+        "200":
+          description: Generated and stored. Values are never returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyConfiguration"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/v1/keys/export:
+    post:
+      tags: [Keys]
+      operationId: exportKeys
+      summary: Export key values (two-step)
+      description: |
+        The only operation that reveals key values (FR-013).
+
+        Step 1, no `confirm_token`: returns `202` with a token, a 120-second expiry and no keys.
+        Step 2, the same request with `confirm_token`: returns the values and writes a
+        `keys.exported` audit entry that records the export without the values.
+
+        An unknown token is `404 confirmation_invalid`; an expired or consumed token is
+        `410 confirmation_expired`. A token presented from a different client address is `404`.
+      parameters:
+        - $ref: "#/components/parameters/ActorLabel"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                confirm_token:
+                  type: string
+                  description: The token from the preceding `202` response.
+      responses:
+        "200":
+          description: The confirmed export.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyExport"
+        "202":
+          description: Confirmation required. Nothing was exported.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfirmationChallenge"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          $ref: "#/components/responses/Gone"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/v1/network/reset:
+    post:
+      tags: [Network]
+      operationId: resetNetwork
+      summary: Reset the coordinator's network (two-step)
+      description: |
+        Clears the key set, returns the active coordinator's Z-Wave network to factory default, and
+        clears the hub's record of network membership (FR-017). The coordinator selection is kept:
+        the same device stays active and reports no network membership afterwards.
+
+        Uses the same two-step confirmation as the export. Step 1 returns `202` with a token and
+        performs nothing; step 2 performs the reset and writes a `network.reset` audit entry.
+
+        This is destructive and irreversible: every securely included device is stranded and must
+        be re-included. The `detail` of a `409 key_in_use` response names this operation as the only
+        supported path for replacing in-use keys (FR-014).
+
+        Operators can close this endpoint without a code change by setting
+        `ZWAVE_HUB_DESTRUCTIVE_OPS=disabled`, which makes it return `503` with
+        `code: destructive_ops_disabled`.
+      parameters:
+        - $ref: "#/components/parameters/ActorLabel"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                confirm_token:
+                  type: string
+      responses:
+        "200":
+          description: The reset completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResetResult"
+        "202":
+          description: Confirmation required. Nothing was reset.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfirmationChallenge"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          $ref: "#/components/responses/Gone"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/v1/audit:
+    get:
+      tags: [Audit]
+      operationId: listAuditEntries
+      summary: Read the audit trail
+      description: |
+        Newest first. Cursor pagination with `before` set to the `id` of the last entry on the
+        previous page. The trail is append-only and survives restarts (FR-019, SC-007).
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: before
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Return entries with `id` less than this value.
+        - name: action
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/AuditAction"
+      responses:
+        "200":
+          description: A page of audit entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditPage"
+
+components:
+  parameters:
+    CoordinatorId:
+      name: coordinator_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: The coordinator identity, as returned by the list endpoint.
+    ActorLabel:
+      name: X-Actor-Label
+      in: header
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+      description: Self-declared client label, recorded in the audit trail as unverified.
+
+  responses:
+    NotFound:
+      description: The resource does not exist.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: The request conflicts with the current state.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    UnprocessableEntity:
+      description: The request was well formed but semantically invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Gone:
+      description: The confirmation token has expired or was already used.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    ServiceUnavailable:
+      description: The hub cannot serve the request right now.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+
+  schemas:
+    SecurityClass:
+      type: string
+      enum:
+        - S2_AccessControl
+        - S2_Authenticated
+        - S2_Unauthenticated
+        - S0_Legacy
+        - S2_Authenticated_LR
+        - S2_AccessControl_LR
+      description: |
+        The four classic classes form the base key set and are the readiness baseline. The two
+        `_LR` classes are Long Range variants and exist only when provisioned explicitly.
+
+    Problem:
+      type: object
+      required: [type, title, status, code, detail]
+      properties:
+        type:
+          type: string
+          examples: ["urn:zwave-hub:error:invalid-key-material"]
+        title:
+          type: string
+        status:
+          type: integer
+        code:
+          type: string
+          enum:
+            - invalid_key_material
+            - duplicate_key_material
+            - key_in_use
+            - coordinator_not_found
+            - coordinator_unsupported
+            - coordinator_network_mismatch
+            - coordinator_unreachable
+            - no_active_coordinator
+            - confirmation_invalid
+            - confirmation_expired
+            - key_store_corrupt
+            - destructive_ops_disabled
+            - command_queue_full
+            - driver_not_ready
+            - invalid_request
+            - internal_error
+        detail:
+          type: string
+          description: Human-readable explanation that never contains key material.
+        request_id:
+          type: string
+        class:
+          $ref: "#/components/schemas/SecurityClass"
+        classes:
+          type: array
+          items:
+            $ref: "#/components/schemas/SecurityClass"
+
+    Coordinator:
+      type: object
+      required: [id, identity_kind, support, attached, selectable, connection]
+      properties:
+        id:
+          type: string
+          examples: ["usb:10c4:ea60:00a1b2c3"]
+          description: |
+            Device identity: `usb:<vid>:<pid>:<serial>` when the device reports a USB serial, which
+            is the norm, or `usb:<vid>:<pid>:port:<topology>` otherwise. Stable across restarts and,
+            for serial-bearing devices, across port changes.
+        identity_kind:
+          type: string
+          enum: [serial, topology]
+          description: '`topology` means the selection survives re-plugging into the same port only.'
+        usb:
+          type: object
+          required: [vid, pid]
+          properties:
+            vid:
+              type: string
+            pid:
+              type: string
+            serial:
+              type: [string, "null"]
+        model:
+          type: object
+          properties:
+            manufacturer:
+              type: [string, "null"]
+            product:
+              type: [string, "null"]
+        zwave:
+          type: [object, "null"]
+          description: Present once the driver has identified the controller.
+          properties:
+            manufacturer_id:
+              type: integer
+            product_type:
+              type: integer
+            product_id:
+              type: integer
+            firmware_version:
+              type: string
+            sdk_version:
+              type: string
+            chip_type:
+              type: string
+        support:
+          type: string
+          enum: [supported, unsupported, unverified]
+        support_reason:
+          type: [string, "null"]
+          enum:
+            - not_a_serial_device
+            - not_passed_through
+            - permission_denied
+            - not_a_zwave_controller
+            - ambiguous_identity
+            - identification_failed
+            - null
+        attached:
+          type: boolean
+        path:
+          type: [string, "null"]
+          examples: ["/dev/serial/by-id/usb-Silicon_Labs_CP2102N-if00-port0"]
+        path_kind:
+          type: string
+          enum: [by_id, tty]
+        selectable:
+          type: boolean
+          description: False for unsupported, ambiguous, or detached devices.
+        connection:
+          type: string
+          enum: [not_attached, connecting, ready, retrying, faulted]
+        next_retry_at:
+          type: [string, "null"]
+          format: date-time
+        last_error:
+          type: [object, "null"]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            at:
+              type: string
+              format: date-time
+        network:
+          type: [object, "null"]
+          description: Present only while `connection` is `ready`.
+          properties:
+            home_id:
+              type: string
+              examples: ["0xdeadbeef"]
+            node_count:
+              type: integer
+            secure_node_count:
+              type: integer
+        first_seen_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+
+    NetworkStatus:
+      type: object
+      required: [state, ready_for_secure_inclusion, blocking_reasons, keys, key_store, driver]
+      properties:
+        state:
+          type: string
+          enum: [unprovisioned, awaiting_coordinator, ready, degraded, faulted]
+        ready_for_secure_inclusion:
+          type: boolean
+        blocking_reasons:
+          type: array
+          items:
+            $ref: "#/components/schemas/BlockingReason"
+        active_coordinator_id:
+          type: [string, "null"]
+        home_id:
+          type: [string, "null"]
+        node_count:
+          type: integer
+        secure_node_count:
+          type: integer
+        keys:
+          type: object
+          required: [revision, in_effect, classic_complete]
+          properties:
+            revision:
+              type: integer
+            applied_revision:
+              type: [integer, "null"]
+            in_effect:
+              type: boolean
+            classic_complete:
+              type: boolean
+            configured_classes:
+              type: array
+              items:
+                $ref: "#/components/schemas/SecurityClass"
+        key_store:
+          type: object
+          required: [state]
+          properties:
+            state:
+              type: string
+              enum: [ok, corrupt]
+            classes:
+              type: array
+              items:
+                $ref: "#/components/schemas/SecurityClass"
+        driver:
+          type: object
+          properties:
+            state:
+              type: string
+              enum: [stopped, starting, ready, retrying, faulted]
+            restarts:
+              type: integer
+            consecutive_failures:
+              type: integer
+            schema_version:
+              type: [integer, "null"]
+            last_error:
+              type: [object, "null"]
+
+    BlockingReason:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - key_store_corrupt
+            - no_active_coordinator
+            - coordinator_not_attached
+            - coordinator_faulted
+            - network_mismatch
+            - existing_network_detected
+            - keys_missing
+            - keys_not_in_effect
+        message:
+          type: string
+        classes:
+          type: array
+          items:
+            $ref: "#/components/schemas/SecurityClass"
+        home_id:
+          type: string
+        node_count:
+          type: integer
+        expected_home_id:
+          type: string
+        actual_home_id:
+          type: string
+        key_revision:
+          type: integer
+        applied_revision:
+          type: integer
+
+    KeyConfiguration:
+      type: object
+      required: [revision, in_effect, classic_complete, classes]
+      properties:
+        revision:
+          type: integer
+        applied_revision:
+          type: [integer, "null"]
+        in_effect:
+          type: boolean
+        classic_complete:
+          type: boolean
+        classes:
+          type: array
+          items:
+            type: object
+            required: [class, configured]
+            properties:
+              class:
+                $ref: "#/components/schemas/SecurityClass"
+              configured:
+                type: boolean
+              source:
+                type: string
+                enum: [generated, supplied]
+              created_at:
+                type: string
+                format: date-time
+              changed_at:
+                type: string
+                format: date-time
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Non-blocking advisories, such as a value shared between a classic and a Long Range class.
+        apply:
+          type: [object, "null"]
+          description: Present when `in_effect` is false.
+          properties:
+            reason:
+              type: string
+              enum:
+                - no_coordinator
+                - coordinator_unavailable
+                - coordinator_faulted
+                - driver_restart_failed
+            message:
+              type: string
+
+    KeySubmission:
+      type: object
+      additionalProperties: false
+      required: [keys]
+      properties:
+        mode:
+          type: string
+          enum: [merge, replace]
+          default: merge
+          description: |
+            `merge` changes only the classes supplied. `replace` requires all four classic classes
+            and removes any configured class not listed.
+        keys:
+          type: object
+          minProperties: 1
+          additionalProperties: false
+          properties:
+            S2_AccessControl:
+              $ref: "#/components/schemas/HexKey"
+            S2_Authenticated:
+              $ref: "#/components/schemas/HexKey"
+            S2_Unauthenticated:
+              $ref: "#/components/schemas/HexKey"
+            S0_Legacy:
+              $ref: "#/components/schemas/HexKey"
+            S2_Authenticated_LR:
+              $ref: "#/components/schemas/HexKey"
+            S2_AccessControl_LR:
+              $ref: "#/components/schemas/HexKey"
+
+    HexKey:
+      type: string
+      pattern: "^[0-9a-fA-F]{32}$"
+      description: 16 bytes as 32 hexadecimal characters. Never logged, never echoed.
+
+    ConfirmationChallenge:
+      type: object
+      required: [operation, token, expires_at]
+      properties:
+        operation:
+          type: string
+          enum: [keys.export, network.reset]
+        token:
+          type: string
+          description: Single-use, bound to this operation and this client address, valid for 120 seconds.
+        expires_at:
+          type: string
+          format: date-time
+        message:
+          type: string
+
+    KeyExport:
+      type: object
+      required: [home_id, exported_at, keys]
+      properties:
+        home_id:
+          type: [string, "null"]
+        exported_at:
+          type: string
+          format: date-time
+        keys:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/HexKey"
+          description: Class name to key value, for configured classes only.
+        warning:
+          type: string
+          description: Reminder that the export is audited and the values are secret.
+
+    ResetResult:
+      type: object
+      required: [state, reset_at, cleared]
+      properties:
+        state:
+          type: string
+          const: unprovisioned
+        reset_at:
+          type: string
+          format: date-time
+        coordinator_id:
+          type: [string, "null"]
+        home_id_before:
+          type: [string, "null"]
+        cleared:
+          type: object
+          required: [keys, network_membership]
+          properties:
+            keys:
+              type: boolean
+            network_membership:
+              type: boolean
+        message:
+          type: string
+
+    AuditAction:
+      type: string
+      enum:
+        - coordinator.selected
+        - coordinator.rejected
+        - keys.replaced
+        - keys.generated
+        - keys.rejected
+        - keys.apply_failed
+        - keys.export_requested
+        - keys.exported
+        - keys.export_rejected
+        - network.reset_requested
+        - network.reset_rejected
+        - network.reset
+        - network.reset_failed
+
+    AuditEntry:
+      type: object
+      required: [id, at, action, actor_addr, request_id, outcome]
+      properties:
+        id:
+          type: integer
+        at:
+          type: string
+          format: date-time
+        action:
+          $ref: "#/components/schemas/AuditAction"
+        actor_addr:
+          type: string
+          description: The requesting client's network address. Not authenticated.
+        actor_label:
+          type: [string, "null"]
+          description: Self-declared and unverified.
+        request_id:
+          type: string
+        coordinator_id:
+          type: [string, "null"]
+        security_class:
+          type: [string, "null"]
+        outcome:
+          type: string
+          enum: [succeeded, failed, rejected]
+        detail:
+          type: object
+          description: Allow-listed fields only. Never contains key material.
+
+    AuditPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEntry"
+        next_before:
+          type: [integer, "null"]
+          description: Pass as `before` to fetch the next page; null when the page is the last.
