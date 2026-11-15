@@ -400,11 +400,26 @@ func (t *Tx) SetKeyRevision(ctx context.Context, revision int) error {
 // SetAppliedRevision records the revision in effect on the running driver, or
 // clears it when revision is nil.
 func (s *Store) SetAppliedRevision(ctx context.Context, revision *int) error {
-	var v any
-	if revision != nil {
-		v = *revision
+	return touchProvisioning(ctx, s.db, "applied_revision = ?", revisionArg(revision))
+}
+
+// SetAppliedRevision is the in-transaction form of Store.SetAppliedRevision.
+// The reset needs it because clearing the key rows and the revisions one they
+// report is a single command, and a command touches the store only through its
+// transaction.
+func (t *Tx) SetAppliedRevision(ctx context.Context, revision *int) error {
+	if t == nil || t.tx == nil {
+		return errors.New("store: transaction is nil")
 	}
-	return touchProvisioning(ctx, s.db, "applied_revision = ?", v)
+	return touchProvisioning(ctx, t.tx, "applied_revision = ?", revisionArg(revision))
+}
+
+// revisionArg binds a missing revision as SQL NULL.
+func revisionArg(revision *int) any {
+	if revision == nil {
+		return nil
+	}
+	return *revision
 }
 
 // touchProvisioning updates one column of the singleton row and stamps

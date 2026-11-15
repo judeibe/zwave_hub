@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -119,7 +120,13 @@ func (b *driverBridge) HardReset(ctx context.Context) error {
 	if b.sup == nil {
 		return driver.ErrClosed
 	}
-	return b.sup.HardReset(ctx)
+	err := b.sup.HardReset(ctx)
+	if driver.IsFirmwareUpdateBusy(err) {
+		// The hub's reason set names this cause separately, and it must not
+		// import the driver package to recognise the driver's error code.
+		return fmt.Errorf("%w: %v", hub.ErrFirmwareUpdateInProgress, err)
+	}
+	return err
 }
 
 // ControllerState reports the live driver's network. The reset reads it until

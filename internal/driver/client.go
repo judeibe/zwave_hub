@@ -322,6 +322,19 @@ func (c *Client) ControllerState(ctx context.Context) (State, error) {
 	return ParseState(raw)
 }
 
+// FirmwareUpdateBusyCode is why the driver refuses a hard reset while it is
+// updating its own firmware: driver.hardReset() throws it and resets nothing
+// (contracts/zwave-server-sidecar.md §6).
+const FirmwareUpdateBusyCode = "FirmwareUpdateCC_NetworkBusy"
+
+// IsFirmwareUpdateBusy reports whether err is that refusal. The hub classifies
+// the reset failure it causes without importing this package, so the adapter
+// between the two asks this and wraps the answer in its own sentinel.
+func IsFirmwareUpdateBusy(err error) bool {
+	var callErr *CallError
+	return errors.As(err, &callErr) && callErr.Code == FirmwareUpdateBusyCode
+}
+
 // Events delivers consumed events (node/added, node/removed, node/ready). It
 // is closed when the connection ends; a slow reader drops events rather than
 // stalling the read loop, which is safe because the supervisor re-reads state
