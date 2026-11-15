@@ -67,10 +67,17 @@ func appendCommand(w *Worker[testState], id, requestID string) Command[testState
 }
 
 // newTestStore opens a store over a fresh temporary directory and closes it
-// when the test ends.
+// when the test ends. It supplies a fixed master key, because a hub test that
+// submits or generates keys seals them, and a store opened without one refuses
+// to seal (R4). A real hub takes the key from ZWAVE_HUB_MASTER_KEY or
+// <DataDir>/master.key; this one is 32 bytes of a test literal and is never
+// anything a deployed hub would hold.
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(context.Background(), store.Options{DataDir: t.TempDir()})
+	st, err := store.Open(context.Background(), store.Options{
+		DataDir:   t.TempDir(),
+		MasterKey: []byte("0123456789abcdef0123456789abcdef"),
+	})
 	if err != nil {
 		t.Fatalf("open the store: %v", err)
 	}

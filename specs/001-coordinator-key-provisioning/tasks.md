@@ -159,8 +159,8 @@ Single Go module at the repository root. Application code in `cmd/zwave-hub/` an
 
 ### Tests for User Story 4
 
-- [ ] T064 [P] [US4] Unit tests for the in-use gate in `internal/hub/keys_test.go`: per-class refusal while secure nodes exist, reset named in the reason, nothing written (FR-014)
-- [ ] T065 [P] [US4] Unit tests for the reset transition in `internal/hub/reset_test.go`: keys cleared, `home_id` NULL, `key_revision = 0`, `applied_revision` NULL, selection retained (FR-017, data-model.md §9.1)
+- [x] T064 [P] [US4] Unit tests for the in-use gate in `internal/hub/keys_test.go`: per-class refusal while secure nodes exist, reset named in the reason, nothing written (FR-014)
+- [x] T065 [P] [US4] Unit tests for the reset transition in `internal/hub/reset_test.go`: keys cleared, `home_id` NULL, `key_revision = 0`, `applied_revision` NULL, selection retained (FR-017, data-model.md §9.1)
 
 ### Implementation for User Story 4
 
