@@ -47,14 +47,14 @@ Delegate each task in a batch to its own sub-agent, concurrently:
 - [x] T078 Security hardening pass: child environment built from the allow-list only, `--disable-dns-sd` present, `ZWAVEJS_LOG_SECURITY_DETAILS` absent, `driver.shutdown` never sent, rendered config unlinked on stop
 - [x] T079 Audit completeness pass over `internal/hub/commands.go` and `internal/store/audit.go`: every mutating operation, and every refused one, writes exactly one audit row with time, actor, action and outcome; export and reset tokens never appear in logs or audit rows (FR-019, SC-007)
 - [x] T080 Reconcile `specs/001-coordinator-key-provisioning/data-model.md` §7 with the implemented audit action set, including the rejected-key action; add that action's row to `contracts/events.md` §4's audit-to-event pairing table and remove it from the not-audited list; reconcile §6 token rejection statuses with the clarified split (`410 confirmation_expired` for expired or used, `404 confirmation_invalid` for unknown or foreign address)
-- [ ] T081 Run `make test`, `make test-contract` and `make lint`, and record the result in the completion report; no target may be skipped or weakened (constitution V, X)
+- [x] T081 Run `make test`, `make test-contract` and `make lint`, and record the result in the completion report; no target may be skipped or weakened (constitution V, X)
 - [x] T082 [P] Add `.github/workflows/ci.yml` invoking `make build`, `make lint`, `make test` and `make test-contract` on pull requests and pushes to `main`, with no step logic outside the make targets (constitution X)
 - [ ] T083 Run the three-alert drill from `quickstart.md` §8.2 — unplug the stick, corrupt one key row with `UPDATE security_keys SET key_blob = x'00'`, kill the sidecar in a loop — and confirm each alert fires with its runbook (constitution VIII, IX)
 
 ## Completion
 
-- [ ] `make test`, `make test-contract` and `make lint` all pass and their output is recorded in the commit message (T081).
-- [ ] `docker build -f deploy/Dockerfile .` succeeds; if Docker or a Linux host is unavailable, record exactly which of T076, T077 and T083 could not be executed and why, and leave those boxes unticked.
+- [x] `make test`, `make test-contract` and `make lint` all pass and their output is recorded in the commit message (T081).
+- [x] `docker build -f deploy/Dockerfile .` succeeds; if Docker or a Linux host is unavailable, record exactly which of T076, T077 and T083 could not be executed and why, and leave those boxes unticked.
 - [ ] Do not tick T076, T077 or T083 unless they were actually executed; they require real hardware or a running container.
 - [ ] Verify all changes work as expected
 - [ ] Run `/speckit.analyze` to verify consistency
