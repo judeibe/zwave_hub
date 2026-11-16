@@ -144,9 +144,14 @@ func (p *Problem) WithClass(class string) *Problem {
 }
 
 // WithClasses names several security classes, as readiness and duplicate-key
-// errors do.
+// errors do. A single class is named in the singular member as well, because
+// the contract has one and a client reading a one-class refusal should not have
+// to know that the plural form exists.
 func (p *Problem) WithClasses(classes ...string) *Problem {
 	p.Classes = append([]string(nil), classes...)
+	if len(p.Classes) == 1 {
+		p.Class = p.Classes[0]
+	}
 	return p
 }
 
