@@ -143,14 +143,8 @@ down: ## Stop and remove the compose stack (quickstart.md §3)
 	$(COMPOSE) down
 
 # Constitution VII: rollback is tested, not assumed. One target wrapping one
-# script, invoked the same way a deploy pipeline invokes it. The script arrives
-# with a later task; until then the missing file is named, not guessed.
-rollback-check: ## Run the rollback drill: previous tag against a copy of the current database
-	@if [ ! -f scripts/rollback-check.sh ]; then \
-		echo "rollback-check: scripts/rollback-check.sh is not present yet; it lands with T077." >&2; \
-		echo "rollback-check: it must start the previous image tag against a copy of the current database" >&2; \
-		echo "rollback-check: and assert GET /readyz plus a readable audit trail." >&2; \
-		echo "rollback-check: no rollback was exercised." >&2; \
-		exit 1; \
-	fi
-	sh scripts/rollback-check.sh
+# script, invoked the same way a deploy pipeline invokes it. Set
+# PREVIOUS_IMAGE=<tag> to run the previous release against a copy of the current
+# database; without it the script says that leg was skipped.
+rollback-check: ## Run the rollback drill against IMAGE:TAG (PREVIOUS_IMAGE=<tag> adds the previous-release leg)
+	IMAGE=$(IMAGE) TAG=$(TAG) sh scripts/rollback-check.sh
