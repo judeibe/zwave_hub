@@ -168,8 +168,8 @@ Single Go module at the repository root. Application code in `cmd/zwave-hub/` an
 - [x] T067 [US4] Add `hard_reset` command support in `internal/driver/client.go`: send, never wait for a forwarded completion, expose the polled state that `internal/hub/reset.go` waits on (FR-017)
 - [x] T068 [US4] Implement reset orchestration in `internal/hub/reset.go`: one command that clears keys, `home_id` and revisions, calls the client's `hard_reset`, confirms completion by polling `controller.get_state`, audits `network.reset` or `network.reset_failed` (FR-017)
 - [x] T069 [US4] Implement unknown-network reporting in `internal/hub/readiness.go`: `existing_network_detected` with `home_id` and `node_count`, generation blocked, the two permitted paths reported (FR-018, R14 §10)
-- [ ] T070 [US4] Implement the reset endpoint and confirmation in `internal/api/confirmations.go`: `resetNetwork` in two steps, and `503 destructive_ops_disabled` when `ZWAVE_HUB_DESTRUCTIVE_OPS=disabled`
-- [ ] T071 [P] [US4] Integration test in `internal/api/reset_test.go`: refusal with secure nodes present, confirmed reset to unprovisioned, readiness false afterwards (quickstart scenario 10)
+- [x] T070 [US4] Implement the reset endpoint and confirmation in `internal/api/confirmations.go`: `resetNetwork` in two steps, and `503 destructive_ops_disabled` when `ZWAVE_HUB_DESTRUCTIVE_OPS=disabled`
+- [x] T071 [P] [US4] Integration test in `internal/api/reset_test.go`: refusal with secure nodes present, confirmed reset to unprovisioned, readiness false afterwards (quickstart scenario 10)
 
 **Checkpoint**: All four stories complete; the dangerous path is gated and reversible only by the explicit operation.
 
