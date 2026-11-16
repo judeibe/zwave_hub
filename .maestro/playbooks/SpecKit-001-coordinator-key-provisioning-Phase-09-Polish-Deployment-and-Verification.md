@@ -48,7 +48,7 @@ Delegate each task in a batch to its own sub-agent, concurrently:
 - [x] T079 Audit completeness pass over `internal/hub/commands.go` and `internal/store/audit.go`: every mutating operation, and every refused one, writes exactly one audit row with time, actor, action and outcome; export and reset tokens never appear in logs or audit rows (FR-019, SC-007)
 - [x] T080 Reconcile `specs/001-coordinator-key-provisioning/data-model.md` §7 with the implemented audit action set, including the rejected-key action; add that action's row to `contracts/events.md` §4's audit-to-event pairing table and remove it from the not-audited list; reconcile §6 token rejection statuses with the clarified split (`410 confirmation_expired` for expired or used, `404 confirmation_invalid` for unknown or foreign address)
 - [ ] T081 Run `make test`, `make test-contract` and `make lint`, and record the result in the completion report; no target may be skipped or weakened (constitution V, X)
-- [ ] T082 [P] Add `.github/workflows/ci.yml` invoking `make build`, `make lint`, `make test` and `make test-contract` on pull requests and pushes to `main`, with no step logic outside the make targets (constitution X)
+- [x] T082 [P] Add `.github/workflows/ci.yml` invoking `make build`, `make lint`, `make test` and `make test-contract` on pull requests and pushes to `main`, with no step logic outside the make targets (constitution X)
 - [ ] T083 Run the three-alert drill from `quickstart.md` §8.2 — unplug the stick, corrupt one key row with `UPDATE security_keys SET key_blob = x'00'`, kill the sidecar in a loop — and confirm each alert fires with its runbook (constitution VIII, IX)
 
 ## Completion
