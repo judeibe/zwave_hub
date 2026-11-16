@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -521,6 +522,48 @@ func presentResetChallenge(challenge hub.ResetChallenge) confirmationChallengeBo
 		Token:     challenge.Token,
 		ExpiresAt: timestamp(challenge.ExpiresAt),
 		Message:   "Repeat the request with this token to reset the network. Nothing has been reset yet.",
+	}
+}
+
+// keyExportBody is contracts/openapi.yaml KeyExport: the one response body that
+// carries key values, and the only implementer of KeyValueBody (FR-013). The
+// marker is on the type, so no member can turn the exemption on for another
+// body.
+type keyExportBody struct {
+	HomeID     *string           `json:"home_id"`
+	ExportedAt string            `json:"exported_at"`
+	Keys       map[string]string `json:"keys"`
+	Warning    string            `json:"warning"`
+}
+
+// KeyValuesPermitted marks the export as the body Present lets carry key-shaped
+// strings. It does nothing; the exemption is decided from the type.
+func (keyExportBody) KeyValuesPermitted() {}
+
+// presentKeyExportChallenge is the 202 body of the two-step export. It hands the
+// caller the token and says plainly that nothing has been exported.
+func presentKeyExportChallenge(challenge hub.KeyExportChallenge) confirmationChallengeBody {
+	return confirmationChallengeBody{
+		Operation: exportOperation,
+		Token:     challenge.Token,
+		ExpiresAt: timestamp(challenge.ExpiresAt),
+		Message:   "Repeat the request with this token to export the keys. Nothing has been exported yet.",
+	}
+}
+
+// presentKeyExport is the 200 body of a confirmed export: the values of the
+// configured classes in hex, the network they belong to and when they were
+// opened. The caller wipes the opened values once this body is encoded.
+func presentKeyExport(export hub.KeyExport) keyExportBody {
+	keys := make(map[string]string, len(export.Keys))
+	for class, value := range export.Keys {
+		keys[class] = hex.EncodeToString(value)
+	}
+	return keyExportBody{
+		HomeID:     optional(export.HomeID),
+		ExportedAt: timestamp(export.ExportedAt),
+		Keys:       keys,
+		Warning:    "The export is audited and the values are secret; store them offline.",
 	}
 }
 
