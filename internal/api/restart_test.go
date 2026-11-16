@@ -204,14 +204,74 @@ func TestRestartRestoresSelectionAndReady(t *testing.T) {
 		t.Errorf("coordinator.selected audit rows = %v, want exactly the one committed before the restart", page["items"])
 	}
 
-	// The keys.in_effect clause of T058 has nowhere to land yet: this repository
-	// has no HTTP key API (internal/api/keys.go and the keys block of the network
-	// body), and no driver apply path that renders the stored keys into the
-	// child's config and sets provisioning.applied_revision. With nothing able
-	// to change a revision or report one in effect, the assertion could only wait
-	// for a field that never turns true. Add it here, against this network
-	// body's keys.in_effect and bounded by the 20 s p95 of plan.md §Performance
-	// Goals, once those three pieces land.
+	// The keys.in_effect clause of T058: a key change made through the API is
+	// stored and reported as not running, and becomes running once the child
+	// comes back carrying it, inside the 20 s p95 budget of plan.md
+	// §Performance Goals.
+	fresh := map[string]string{
+		hub.SecurityClassS2AccessControl:   "00112233445566778899aabbccddeeff",
+		hub.SecurityClassS2Authenticated:   "102132435465768798a9bacbdcedfe0f",
+		hub.SecurityClassS2Unauthenticated: "2031425364758697a8b9cadbecfd0e1f",
+		hub.SecurityClassS0Legacy:          "30415263748596a7b8c9daebfc0d1e2f",
+	}
+	started := time.Now()
+	submitted := assertBody(t, "after key change",
+		second.do("PUT", "/api/v1/keys", keysTestSubmissionBody(t, "", fresh)),
+		wantField{"in_effect", false},
+	)
+
+	// The network body the clause is written against says the same thing before
+	// the driver has reported: the revision is stored, not running.
+	stored := assertBody(t, "after key change", second.do("GET", "/api/v1/network", ""))
+	if keys, _ := stored["keys"].(map[string]any); keys["in_effect"] != false {
+		t.Errorf("after key change: keys.in_effect = %v before the driver's report, want false", keys["in_effect"])
+	}
+
+	// The fixture runs no supervisor, so the child's return is reported here, as
+	// Adopt stands in for the ready report: the revision the child was started
+	// with is the one now running (FR-015).
+	revision := keysTestIntMember(t, "after key change", submitted, "revision")
+	if err := second.hub.NoteKeysApplied(ctx, dev.Identity.ID, revision, homeID, started); err != nil {
+		t.Fatalf("note the applied revision: %v", err)
+	}
+	applied := awaitKeysInEffect(t, second, "after key change", started)
+	keys, _ := applied["keys"].(map[string]any)
+	if keys["revision"] != submitted["revision"] {
+		t.Errorf("after key change: keys.revision = %v, want the submitted revision %v", keys["revision"], submitted["revision"])
+	}
+	if keys["applied_revision"] != keys["revision"] {
+		t.Errorf("after key change: keys.applied_revision = %v, want the running revision %v", keys["applied_revision"], keys["revision"])
+	}
+}
+
+// keysInEffectBudget is the p95 of plan.md §Performance Goals: how long a key
+// change may take to reach keys.in_effect, dominated by the driver restart.
+// One test measures one transition, so it asserts that transition stays inside
+// the budget rather than making a claim about the distribution.
+const keysInEffectBudget = 20 * time.Second
+
+// awaitKeysInEffect polls the network body until the committed revision is the
+// one running, and fails when the budget passes first. A revision is applied on
+// the child's next start (FR-012), so the value turns true after the driver's
+// report rather than in the response to the change.
+func awaitKeysInEffect(t *testing.T, f *restartFixture, what string, started time.Time) map[string]any {
+	t.Helper()
+	for {
+		rec := f.do("GET", "/api/v1/network", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: network status %d: %s", what, rec.Code, rec.Body)
+		}
+		body := decode(t, rec)
+		keys, _ := body["keys"].(map[string]any)
+		if keys["in_effect"] == true {
+			return body
+		}
+		if elapsed := time.Since(started); elapsed > keysInEffectBudget {
+			t.Fatalf("%s: keys.in_effect still %v %s after the key change, want true within the %s budget",
+				what, keys["in_effect"], elapsed, keysInEffectBudget)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // TestUS2KeysSurviveARestart is the US2 independent test of the playbook's
