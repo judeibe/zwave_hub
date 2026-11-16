@@ -50,11 +50,27 @@ Delegate each task in a batch to its own sub-agent, concurrently:
 - [x] T081 Run `make test`, `make test-contract` and `make lint`, and record the result in the completion report; no target may be skipped or weakened (constitution V, X)
 - [x] T082 [P] Add `.github/workflows/ci.yml` invoking `make build`, `make lint`, `make test` and `make test-contract` on pull requests and pushes to `main`, with no step logic outside the make targets (constitution X)
 - [ ] T083 Run the three-alert drill from `quickstart.md` §8.2 — unplug the stick, corrupt one key row with `UPDATE security_keys SET key_blob = x'00'`, kill the sidecar in a loop — and confirm each alert fires with its runbook (constitution VIII, IX)
+  - Note (not executed — left unticked): the drill needs a real Z-Wave stick to unplug, a running production container with `deploy/compose.yaml`, and a log pipeline carrying the three alert rules of `contracts/events.md` §5. None exists in this Auto Run environment, and the mock driver cannot stand in because the first alert is the stick leaving the bus. What was checked instead is not the drill: the events the alerts derive from are unit-tested, and `network.state_changed to=faulted` and `keys.corrupt` are emitted by the hub. See Manual Follow-Up.
 
 ## Completion
 
 - [x] `make test`, `make test-contract` and `make lint` all pass and their output is recorded in the commit message (T081).
 - [x] `docker build -f deploy/Dockerfile .` succeeds; if Docker or a Linux host is unavailable, record exactly which of T076, T077 and T083 could not be executed and why, and leave those boxes unticked.
-- [ ] Do not tick T076, T077 or T083 unless they were actually executed; they require real hardware or a running container.
-- [ ] Verify all changes work as expected
-- [ ] Run `/speckit.analyze` to verify consistency
+- [x] Do not tick T076, T077 or T083 unless they were actually executed; they require real hardware or a running container. (None of the three is ticked; each carries a note saying what ran and what did not.)
+- [x] Verify all changes work as expected (`make test`, `make lint`, `make test-contract`, `go test -race ./internal/...` and `docker build` all pass; `make run-mock` and `make rollback-check` were run for real, within the limits in the T076 and T077 notes.)
+- [x] Run `/speckit.analyze` to verify consistency
+  - Note: read-only run. `.specify/extensions.yml` is absent, so no hooks ran. `spec.md`, `plan.md`, `research.md`, `data-model.md`, `contracts/`, `quickstart.md` and `tasks.md` are all present. Constitution rules III, VI, VII and X were checked against the changes of this phase and none is violated: no env reads outside `internal/config`, no global state or `init()`, key material never logged, the CI workflow calls only make targets. One non-blocking observation: `tasks.md` cites a requirement id in only 23 lines, so FR-001, FR-002, FR-007, FR-009, FR-010 and FR-020 are covered by the story phases rather than named by id; no requirement was found with no implementing task. The checkboxes in `specs/…/tasks.md` are not the Auto Run tracker and were not edited.
+
+## Manual Follow-Up (not executed by Auto Run)
+
+These need a human, real hardware or a second release. None blocks the commits made here.
+
+- **T076, real-hardware scenarios** (`quickstart.md` §4), on a Linux host with a Z-Wave USB stick:
+  - S2: real USB enumeration, plus the `not_passed_through` and `permission_denied` diagnostics (start the container without `/dev` and without the dialout group).
+  - S9: re-plug the stick at a different port and confirm the same coordinator id returns to `ready`.
+  - S10: `409 key_in_use` with securely included devices, and a confirmed reset on a real controller (the mock has no `hardReset`).
+  - S5: the export token presented from a second client address returns `404 confirmation_invalid`; the store layer is covered by `TestConsumeConfirmationActorBinding`.
+  - Tick T076 only once all of these have run.
+- **T077, previous-image leg:** once a second release exists, run `PREVIOUS_IMAGE=zwave-hub:<previous> make rollback-check` and confirm the previous binary opens a database migrated by the new one and ignores the new columns. Tick T077 after that.
+- **T083, three-alert drill** (`quickstart.md` §8.2) in the production container: (1) unplug the stick and confirm `coordinator_unreachable` fires after 2 minutes with its runbook; (2) corrupt one row with `UPDATE security_keys SET key_blob = x'00'` and confirm the key-store alert fires; (3) kill the sidecar in a loop and confirm the restart-loop alert fires. Restore the row from a backup afterwards. Tick T083 after all three.
+
