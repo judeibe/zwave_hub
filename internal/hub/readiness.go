@@ -339,6 +339,7 @@ func (h *Hub) NetworkStatus(ctx context.Context) (NetworkStatus, error) {
 	if err != nil {
 		return NetworkStatus{}, fmt.Errorf("hub: read the key store: %w", err)
 	}
+	h.reportKeyStore(ctx, corrupt)
 	keys, err := h.keyConfiguration(ctx, nil)
 	if err != nil {
 		return NetworkStatus{}, err
@@ -384,6 +385,7 @@ func (h *Hub) NetworkStatus(ctx context.Context) (NetworkStatus, error) {
 	status.Keys = keys
 	status.KeyStore = in.KeyStore
 	status.CorruptClasses = in.CorruptClasses
+	h.observeNetwork(ctx, status)
 	return status, nil
 }
 

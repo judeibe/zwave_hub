@@ -43,6 +43,12 @@ const (
 // after the server has stopped, so no handler can write to a closed database.
 const shutdownTimeout = 10 * time.Second
 
+// monitorInterval is how often the hub derives its network state so that
+// network.state_changed and keys.corrupt fire without a client reading
+// GET /network. The coordinator_unreachable alert waits two minutes, so a few
+// seconds of detection delay is invisible to it.
+const monitorInterval = 5 * time.Second
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "zwave-hub: %v\n", err)
@@ -114,6 +120,8 @@ func run() error {
 
 	background.Add(1)
 	go func() { defer background.Done(); bridge.run(ctx) }()
+	background.Add(1)
+	go func() { defer background.Done(); h.Monitor(ctx, monitorInterval) }()
 
 	if cfg.DriverMode == config.DriverModeMock {
 		if err := h.SyncDiscovery(ctx, []coordinator.Device{mockDevice()}); err != nil {

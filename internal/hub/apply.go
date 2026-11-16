@@ -56,6 +56,7 @@ func (h *Hub) KeyMaterial(ctx context.Context) (KeyMaterial, error) {
 			material.Classic[stored.SecurityClass] = value
 		}
 	}
+	h.reportKeyStore(ctx, corrupt)
 	if len(corrupt) > 0 {
 		wipeKeyValues(material.Classic)
 		wipeKeyValues(material.LongRange)

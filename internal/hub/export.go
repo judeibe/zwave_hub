@@ -173,6 +173,7 @@ func (h *Hub) openKeyExport(ctx context.Context) (KeyExport, error) {
 		}
 		values[stored.SecurityClass] = value
 	}
+	h.reportKeyStore(ctx, corrupt)
 	if len(corrupt) > 0 {
 		wipeKeyValues(values)
 		return KeyExport{}, &KeyStoreCorruptError{Classes: canonicalClasses(corrupt)}

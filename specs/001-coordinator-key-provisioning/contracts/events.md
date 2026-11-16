@@ -136,7 +136,7 @@ Every field named in a row is always present on that event. Optional context com
 | `keys.applied` | info | `revision`, `applied_revision`, `duration_ms` |
 | `keys.apply_failed` | warn | `revision`, `applied_revision`, `reason` |
 | `keys.in_use_rejected` | info | `classes`, `secure_node_count` |
-| `keys.corrupt` | error | `classes`, `detected_by` (`aead` \| `integrity_check`). **Alert trigger.** |
+| `keys.corrupt` | error | `classes`, `detected_by` (`aead` \| `integrity_check`). **Alert trigger.** Emitted when the set of classes failing authentication changes from the last one reported, by `hub.Monitor` every 5 s and by every key read, export and driver start, so one corruption is one record and a repaired store that corrupts again alerts again. A damaged database file is refused at open and reports `store.integrity_failed` instead, so `detected_by` is `aead` in practice. |
 | `keys.export_requested` | info | `operation`, `expires_at` |
 | `keys.exported` | warn | `classes`, `home_id`. `warn` because exporting key material is worth noticing. |
 | `keys.export_rejected` | warn | `reason` (`invalid` \| `expired`). The confirmation store cannot tell an expired token from a consumed one, nor an unknown token from a foreign address, by design (data-model.md §6), so `expired` covers expired and consumed and `invalid` covers unknown and foreign. |
@@ -145,7 +145,7 @@ Every field named in a row is always present on that event. Optional context com
 
 | Event | Level | Additional fields |
 |---|---|---|
-| `network.state_changed` | info | `from`, `to`, `reason`. The derivation of `state` is in `data-model.md` §8.2. |
+| `network.state_changed` | info | `from`, `to`, `reason`. The derivation of `state` is in `data-model.md` §8.2. Emitted whenever the derived state differs from the last one observed, by a derivation every 5 s (`hub.Monitor`) and by every `GET /network`. The first observation after start-up has `from: "unknown"`, so a hub that boots faulted still emits a transition into `faulted`. `reason` is the first blocking reason code of §8.3, or `ready`. |
 | `network.existing_detected` | warn | `node_count`. A stick carrying an unknown network; FR-018 auto-generation is blocked. |
 | `network.reset_requested` | warn | `expires_at`. A confirmation token was issued; nothing has been reset. |
 | `network.reset_started` | warn | `home_id_before`. The token was redeemed and the reset is under way. |

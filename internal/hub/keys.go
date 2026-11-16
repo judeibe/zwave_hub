@@ -442,6 +442,7 @@ func (h *Hub) refuseCorruptStore(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("hub: check the key store: %w", err)
 	}
+	h.reportKeyStore(ctx, corrupt)
 	if len(corrupt) == 0 {
 		return nil
 	}

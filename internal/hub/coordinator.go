@@ -294,6 +294,10 @@ type Hub struct {
 	driverMu sync.RWMutex
 	driver   NetworkDriver
 	applier  KeyApplier
+
+	// alerts remembers the network state and key-store verdict already
+	// reported, so the two alert-trigger events fire on a change only.
+	alerts alertWatch
 }
 
 // selectionAttempts bounds how often Select rebuilds its decision when a
