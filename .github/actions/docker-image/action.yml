@@ -50,6 +50,7 @@ runs:
       uses: docker/build-push-action@v6
       with:
         context: .
+        file: deploy/Dockerfile
         platforms: linux/amd64
         push: ${{ inputs.push == 'true' }}
         build-args: VERSION=${{ inputs.release-tag || 'dev' }}
