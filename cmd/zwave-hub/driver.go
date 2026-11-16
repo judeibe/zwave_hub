@@ -106,6 +106,26 @@ func (b *driverBridge) reconcile(ctx context.Context) {
 	b.signature = signature
 }
 
+// Apply makes the bridge the hub's key applier: a committed key change restarts
+// only the child, which re-renders its config from the database (FR-012). The
+// supervisor ignores it when no child is being supervised.
+func (b *driverBridge) Apply(ctx context.Context) {
+	if b.sup != nil {
+		b.sup.Apply(ctx)
+	}
+}
+
+// keys is the supervisor's key source: the opened set of the committed
+// revision. A store that cannot authenticate is an error, so the child is never
+// started from a partial set.
+func (b *driverBridge) keys(ctx context.Context) (driver.KeySet, error) {
+	material, err := b.hub.KeyMaterial(ctx)
+	if err != nil {
+		return driver.KeySet{}, err
+	}
+	return driver.KeySet{Revision: material.Revision, Keys: material.Classic, LongRange: material.LongRange}, nil
+}
+
 func (b *driverBridge) stop() {
 	if b.sup != nil {
 		b.sup.Stop()
@@ -153,6 +173,7 @@ func (b *driverBridge) report(ctx context.Context, r driver.Report) {
 		if r.State == nil {
 			return
 		}
+		started := time.Now()
 		_ = b.hub.Adopt(ctx, r.CoordinatorID, hub.Identified{
 			Controller: store.ControllerIdentity{
 				FirmwareVersion: r.State.Controller.FirmwareVersion,
@@ -168,6 +189,9 @@ func (b *driverBridge) report(ctx context.Context, r driver.Report) {
 				SecureNodeCount: r.State.SecureNodeCount,
 			},
 		})
+		// The child is up with the revision it was started with: record it, and
+		// the controller's home ID with it (FR-012, FR-015).
+		_ = b.hub.NoteKeysApplied(ctx, r.CoordinatorID, r.KeyRevision, r.State.HomeID, started)
 	case driver.ConnectionConnecting:
 		_ = b.hub.SetDriverStatus(ctx, r.CoordinatorID, hub.ConnectionConnecting, nil, nil)
 	case driver.ConnectionRetrying, driver.ConnectionFaulted:
@@ -180,6 +204,9 @@ func (b *driverBridge) report(ctx context.Context, r driver.Report) {
 			conn = hub.ConnectionFaulted
 		}
 		_ = b.hub.SetDriverStatus(ctx, r.CoordinatorID, conn, r.NextRetryAt, last)
+		if last != nil {
+			_ = b.hub.NoteKeysApplyFailed(ctx, r.CoordinatorID, last.Code)
+		}
 	}
 }
 

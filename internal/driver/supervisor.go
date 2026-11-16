@@ -48,6 +48,18 @@ type Report struct {
 	LastError     *LastError
 	NextRetryAt   *time.Time
 	SchemaVersion int
+	// KeyRevision is the key revision the child was started with. It is set on a
+	// ready report and is zero when the child ran without keys.
+	KeyRevision int
+}
+
+// KeySet is the key material one child start is rendered with, and the
+// revision it belongs to. Values are raw bytes; the supervisor wipes them once
+// the file is written.
+type KeySet struct {
+	Revision  int
+	Keys      map[string][]byte
+	LongRange map[string][]byte
 }
 
 // LastError is the cause of the latest failure, for the last-error field.
@@ -73,6 +85,10 @@ type Options struct {
 	LogLevel string
 	// Emitter receives the driver.* events; nil disables them.
 	Emitter *event.Emitter
+	// Keys reads the committed key set for the next child start. Nil means the
+	// child is started without keys. It is called once per start attempt, so a
+	// restart always renders the database as it is now (FR-012).
+	Keys func(ctx context.Context) (KeySet, error)
 	// Report receives each connection change. It is called from the
 	// supervisor's goroutine and must not block for long.
 	Report func(context.Context, Report)
@@ -152,6 +168,49 @@ func (s *Supervisor) Resume(ctx context.Context) {
 		return
 	}
 	s.Start(ctx, *target)
+}
+
+// Apply restarts only the child so it comes back with the keys now in the
+// database (FR-012). It is Resume under the name that says why: the target is
+// kept, the supervision loop restarts and clears its failure count, and the new
+// child's ready report carries the revision it started with. With no target
+// there is nothing to restart.
+func (s *Supervisor) Apply(ctx context.Context) {
+	s.Resume(ctx)
+}
+
+// renderKeys reads the key set and writes the config file for one start. With
+// no key source, or no keys, there is no file and no --config. The plaintext is
+// wiped as soon as the file is written, so the bytes live only as long as the
+// render takes.
+func (s *Supervisor) renderKeys(ctx context.Context) (KeySet, *ConfigFile, error) {
+	if s.opts.Keys == nil {
+		return KeySet{}, nil, nil
+	}
+	set, err := s.opts.Keys(ctx)
+	if err != nil {
+		return KeySet{}, nil, fmt.Errorf("%w: %v", errKeys, err)
+	}
+	defer wipe(set.Keys)
+	defer wipe(set.LongRange)
+	spec := ConfigSpec{CacheDir: s.opts.CacheDir, LogLevel: s.opts.LogLevel, Keys: set.Keys, LongRange: set.LongRange}
+	if !spec.HasKeys() {
+		return KeySet{Revision: set.Revision}, nil, nil
+	}
+	file, err := WriteConfig(s.opts.RunDir, spec)
+	if err != nil {
+		return KeySet{}, nil, fmt.Errorf("%w: %v", errKeys, err)
+	}
+	return KeySet{Revision: set.Revision}, file, nil
+}
+
+// wipe zeroes every value of a key map.
+func wipe(values map[string][]byte) {
+	for _, value := range values {
+		for i := range value {
+			value[i] = 0
+		}
+	}
 }
 
 // Stop ends the current child and waits until it has exited. It is idempotent.
@@ -275,7 +334,12 @@ func (s *Supervisor) runOnce(ctx context.Context, target Target, attempt int) er
 	if err != nil {
 		return err
 	}
-	cmd := s.command(ctx, target, port)
+	keySet, configFile, err := s.renderKeys(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = configFile.Remove() }()
+	cmd := s.command(ctx, target, port, configFile.Path())
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("driver: stdout pipe: %w", err)
@@ -339,7 +403,10 @@ func (s *Supervisor) runOnce(ctx context.Context, target Target, attempt int) er
 	// rather than on a closing socket.
 	s.setClient(client)
 	defer s.clearClient(client)
-	s.report(ctx, Report{CoordinatorID: target.CoordinatorID, Connection: ConnectionReady, State: &state, SchemaVersion: client.Schema})
+	s.report(ctx, Report{
+		CoordinatorID: target.CoordinatorID, Connection: ConnectionReady, State: &state,
+		SchemaVersion: client.Schema, KeyRevision: keySet.Revision,
+	})
 
 	select {
 	case <-ctx.Done():
@@ -394,6 +461,7 @@ var (
 	errSocketClosed = errors.New("driver_socket_closed")
 	errSpawn        = errors.New("driver_spawn_failed")
 	errExited       = errors.New("driver_exited")
+	errKeys         = errors.New("driver_keys_unavailable")
 )
 
 func errOrExit(err error) error {
@@ -425,7 +493,7 @@ func eventReason(err error) string {
 		return "protocol_unsupported"
 	case errors.Is(err, errStartTimeout):
 		return "handshake_timeout"
-	case errors.Is(err, errSpawn):
+	case errors.Is(err, errSpawn), errors.Is(err, errKeys):
 		return "spawn_failed"
 	case errors.Is(err, errSocketClosed), errors.Is(err, errExited):
 		return "exited"
@@ -451,9 +519,8 @@ func errorMessage(err error) string {
 
 // command builds the child invocation of contracts/zwave-server-sidecar.md §1
 // with an allow-listed environment. The config file is only passed once keys
-// exist: the real server refuses --config without securityKeys.S0_Legacy, and
-// this phase has no keys to render.
-func (s *Supervisor) command(ctx context.Context, target Target, port int) *exec.Cmd {
+// exist: the real server refuses --config without securityKeys.S0_Legacy.
+func (s *Supervisor) command(ctx context.Context, target Target, port int, configPath string) *exec.Cmd {
 	node := s.opts.NodePath
 	if node == "" {
 		node = "node"
@@ -466,6 +533,9 @@ func (s *Supervisor) command(ctx context.Context, target Target, port int) *exec
 		args = append(args, target.SerialPath)
 	}
 	args = append(args, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--disable-dns-sd")
+	if configPath != "" {
+		args = append(args, "--config", configPath)
+	}
 	if !s.opts.Mock {
 		args = append(args, "--reconnect")
 	}

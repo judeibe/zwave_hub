@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/judeibe/zwave_hub/internal/coordinator"
+	"github.com/judeibe/zwave_hub/internal/event"
 	"github.com/judeibe/zwave_hub/internal/store"
 )
 
@@ -16,8 +17,15 @@ import (
 // hub's stop ahead of the store's close.
 func newTestHub(t *testing.T) (*Hub, *store.Store) {
 	t.Helper()
+	return newTestHubWith(t, nil)
+}
+
+// newTestHubWith is newTestHub with the emitter the caller supplies, so a test
+// can read the event stream the hub writes.
+func newTestHubWith(t *testing.T, emitter *event.Emitter) (*Hub, *store.Store) {
+	t.Helper()
 	st := newTestStore(t)
-	h, err := New(st, nil)
+	h, err := New(st, emitter)
 	if err != nil {
 		t.Fatalf("create the hub: %v", err)
 	}

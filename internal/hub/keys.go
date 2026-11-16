@@ -246,6 +246,7 @@ func (h *Hub) SubmitKeys(ctx context.Context, req KeySubmission) (KeyConfigurati
 		return KeyConfiguration{}, fmt.Errorf("hub: submit keys: %w", err)
 	}
 	h.emitKeys(ctx, reqID, state.keyRevision, classes, store.KeySourceSupplied)
+	h.applyCommitted(ctx)
 
 	return h.keyConfiguration(ctx, warnings)
 }
@@ -288,6 +289,7 @@ func (h *Hub) GenerateKeys(ctx context.Context, req KeyGeneration) (KeyConfigura
 		return KeyConfiguration{}, fmt.Errorf("hub: generate keys: %w", err)
 	}
 	h.emitKeys(ctx, reqID, state.keyRevision, classes, store.KeySourceGenerated)
+	h.applyCommitted(ctx)
 
 	return h.keyConfiguration(ctx, nil)
 }
@@ -477,6 +479,7 @@ func (h *Hub) generateOnActivation(ctx context.Context, id string, nodeCount int
 		return err
 	}
 	h.emitKeys(ctx, req, committed.keyRevision, classes, store.KeySourceGenerated)
+	h.applyCommitted(ctx)
 	return nil
 }
 
@@ -660,10 +663,21 @@ func (h *Hub) pendingApply(cfg KeyConfiguration, activeID string) *KeyApply {
 	h.mu.RLock()
 	known, ok := h.known[activeID]
 	connection := ConnectionNotAttached
+	applyFailed := false
 	if ok && known.overlay.connection != "" {
 		connection = known.overlay.connection
 	}
+	if ok {
+		applyFailed = known.overlay.applyFailedRevision == cfg.Revision
+	}
 	h.mu.RUnlock()
+
+	if applyFailed && connection != ConnectionFaulted {
+		return &KeyApply{
+			Reason:  ApplyDriverRestartFailed,
+			Message: "The driver could not be restarted with the stored keys; the next successful start applies them.",
+		}
+	}
 
 	if connection == ConnectionFaulted {
 		return &KeyApply{

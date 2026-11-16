@@ -3,6 +3,8 @@ package driver
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -433,6 +435,145 @@ func TestDecideDoesNotOscillate(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		if got := Decide(in); got != ActionLeave {
 			t.Fatalf("tick %d asked for %s, want a settled leave", i, got)
+		}
+	}
+}
+
+// nodeArgShim writes an executable that records the arguments of one child
+// start and then runs the real node, so a test can see exactly what the
+// supervisor invoked.
+func nodeArgShim(t *testing.T) (path, argsFile string) {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not on PATH")
+	}
+	dir := t.TempDir()
+	argsFile = filepath.Join(dir, "args")
+	path = filepath.Join(dir, "node")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$@\" > " + argsFile + "\n" +
+		"exec " + node + " \"$@\"\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path, argsFile
+}
+
+// configArg reads the arguments the shim recorded and returns the --config
+// path, failing when the child was started without one.
+func configArg(t *testing.T, argsFile string) string {
+	t.Helper()
+	contents, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read the recorded child arguments: %v", err)
+	}
+	args := strings.Split(strings.TrimSpace(string(contents)), "\n")
+	for i, arg := range args {
+		if arg == "--config" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	t.Fatalf("the child was started without --config: %v", args)
+	return ""
+}
+
+// TestSupervisorAppliesCommittedKeys proves FR-012 at the supervisor's end: the
+// child is started with a rendered config carrying the committed keys, the
+// ready report names the revision it was started with, the plaintext is wiped
+// once the file is written, and Apply restarts the child so it renders the
+// revision stored now.
+func TestSupervisorAppliesCommittedKeys(t *testing.T) {
+	sidecar := sidecarDir(t)
+	nodePath, argsFile := nodeArgShim(t)
+	rep := newReports()
+	runDir := t.TempDir()
+
+	s0 := bytes.Repeat([]byte{0x11}, 16)
+	authenticated := bytes.Repeat([]byte{0x22}, 16)
+	wantS0 := hex.EncodeToString(s0)
+	wantAuthenticated := hex.EncodeToString(authenticated)
+
+	revision := 7
+	var rendered map[string][]byte
+	sup, err := NewSupervisor(Options{
+		SidecarDir: sidecar,
+		NodePath:   nodePath,
+		Mock:       true,
+		RunDir:     runDir,
+		CacheDir:   t.TempDir(),
+		Keys: func(context.Context) (KeySet, error) {
+			// Fresh bytes on every call, as KeyMaterial opens fresh values on
+			// every start; the supervisor wipes what it is given.
+			rendered = map[string][]byte{
+				"S0_Legacy":        bytes.Repeat([]byte{0x11}, 16),
+				"S2_Authenticated": bytes.Repeat([]byte{0x22}, 16),
+			}
+			return KeySet{Revision: revision, Keys: rendered}, nil
+		},
+		Report: rep.add,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sup.Stop()
+	sup.Start(context.Background(), Target{CoordinatorID: "usb:10c4:ea60:abc"})
+
+	ready := rep.waitFor(t, ConnectionReady, 30*time.Second)
+	if ready.KeyRevision != 7 {
+		t.Errorf("ready report carries revision %d, want the started revision 7", ready.KeyRevision)
+	}
+	first := configArg(t, argsFile)
+	checkRenderedConfig(t, first, map[string]string{
+		"S0_Legacy":        wantS0,
+		"S2_Authenticated": wantAuthenticated,
+	})
+	for class, value := range rendered {
+		if !bytes.Equal(value, make([]byte, len(value))) {
+			t.Errorf("the plaintext of %s was not wiped after the file was written", class)
+		}
+	}
+
+	// A committed change asks for the child to come back; the next start reads
+	// the source again rather than reusing the previous render.
+	revision = 8
+	sup.Apply(context.Background())
+	if _, err := os.Stat(first); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the previous config file still exists after the restart: %v", err)
+	}
+	ready = rep.waitFor(t, ConnectionReady, 30*time.Second)
+	if ready.KeyRevision != 8 {
+		t.Errorf("ready report after Apply carries revision %d, want 8", ready.KeyRevision)
+	}
+	second := configArg(t, argsFile)
+	if second == first {
+		t.Errorf("the restarted child reused the config file %s", first)
+	}
+	checkRenderedConfig(t, second, map[string]string{
+		"S0_Legacy":        wantS0,
+		"S2_Authenticated": wantAuthenticated,
+	})
+}
+
+// checkRenderedConfig proves the file at path is mode 0600 and carries each
+// class as a Buffer of its raw bytes.
+func checkRenderedConfig(t *testing.T, path string, want map[string]string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat the rendered config: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("config file mode = %o, want 600", perm)
+	}
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the rendered config: %v", err)
+	}
+	for class, value := range want {
+		entry := class + `: Buffer.from("` + value + `", "hex")`
+		if !strings.Contains(string(source), entry) {
+			t.Errorf("the rendered config does not carry %s as a Buffer", class)
 		}
 	}
 }

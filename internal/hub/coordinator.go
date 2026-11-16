@@ -218,6 +218,11 @@ type overlay struct {
 
 	nextRetryAt *time.Time
 	lastError   *LastError
+
+	// applyFailedRevision is the key revision the latest apply attempt failed
+	// to bring up, or zero. It makes the failure audited once per revision and
+	// is what pendingApply reports as driver_restart_failed.
+	applyFailedRevision int
 }
 
 // snapshot builds the published view of one coordinator.
@@ -288,6 +293,7 @@ type Hub struct {
 	// needs the hub and the two cannot be built in one expression.
 	driverMu sync.RWMutex
 	driver   NetworkDriver
+	applier  KeyApplier
 }
 
 // selectionAttempts bounds how often Select rebuilds its decision when a

@@ -97,6 +97,7 @@ func run() error {
 		CacheDir:   filepath.Join(cfg.DataDir, "zwave-cache"),
 		LogLevel:   "info",
 		Emitter:    emitter,
+		Keys:       bridge.keys,
 		Report:     bridge.report,
 	})
 	if err != nil {
@@ -108,6 +109,7 @@ func run() error {
 	// bridge as its report callback, so the two cannot be built in one
 	// expression (constitution III: everything is injected, nothing global).
 	h.SetNetworkDriver(bridge)
+	h.SetKeyApplier(bridge)
 
 	background.Add(1)
 	go func() { defer background.Done(); bridge.run(ctx) }()
@@ -146,6 +148,7 @@ func run() error {
 	})
 	api.NewCoordinators(h).Mount(router)
 	api.NewNetwork(h).Mount(router)
+	api.NewConfirmations(h, cfg.DestructiveOps).Mount(router)
 	api.NewAudit(st).Mount(router)
 
 	// Listen before serving so a port already in use fails here, with a
