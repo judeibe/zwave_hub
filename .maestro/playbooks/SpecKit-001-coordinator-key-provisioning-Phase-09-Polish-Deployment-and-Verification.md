@@ -1,0 +1,58 @@
+# Phase 09: Polish & Cross-Cutting Concerns
+
+Packages the hub as one Docker image with USB passthrough, adds benchmarks and CI, reconciles the design documents with what was built, and runs the verification passes the constitution requires. Tasks that need real hardware, a Linux host or the production drill are flagged and must not be faked.
+
+## Spec Kit Context
+
+- **Spec Kit phase:** Phase 7 of tasks.md (this file is execution phase 09 of 09)
+- **Feature:** 001-coordinator-key-provisioning
+- **Specification:** specs/001-coordinator-key-provisioning/spec.md (note: this feature's spec file is `spec.md`, not `specification.md`)
+- **Plan:** specs/001-coordinator-key-provisioning/plan.md
+- **Task source:** specs/001-coordinator-key-provisioning/tasks.md (task IDs and `[US#]` markers below are copied verbatim)
+- **Design documents:** specs/001-coordinator-key-provisioning/research.md, data-model.md, quickstart.md, contracts/openapi.yaml, contracts/zwave-server-sidecar.md, contracts/events.md
+- **Constitution:** .specify/memory/constitution.md (Principles I–X are binding; the Principle I deviation for the `zwave-server` child is recorded in plan.md §Complexity Tracking)
+
+## Execution Rules
+
+Work through this document without asking the user anything. If something is ambiguous, follow the design documents above, record the choice in the task's commit message, and continue.
+
+1. **Sequential tasks** (no `[P]`) run in listed order, one at a time, by you.
+2. **Parallel tasks** (`[P]`) that appear next to each other form a *parallel batch*. Delegate **each `[P]` task in a batch to its own sub-agent** (use the `subagent` tool, agent `general`), launching every sub-agent in the batch in a single step so they run concurrently, and wait for all of them before starting the next task or batch. A sub-agent prompt must be self-contained: give it the full task line, the Spec Kit Context paths above, the Go module path and package layout from plan.md §Source Code, and the instruction to create or edit **only the file(s) named in that task**. Do not let two sub-agents touch the same file; if they would, run those tasks sequentially instead.
+3. After a batch returns, review each sub-agent's result, run `gofmt` and `go vet` on the touched packages, fix integration problems yourself, then tick the checkboxes.
+4. Tests listed before an implementation are written first and should fail before the implementation lands.
+5. Tick a task's checkbox (`- [x]`) only when its file exists, builds, and its stated behaviour is verified. Never tick a task that you skipped or weakened.
+6. Search the repository for an existing helper before writing a new one. Constitution III: constructor injection, no globals, no `init()`, no environment reads outside `internal/config`. Constitution VI: events only through `internal/event`; never log key material.
+7. Commit after each task or logical group, but do not push.
+
+## Parallel Batches
+
+Delegate each task in a batch to its own sub-agent, concurrently:
+
+- T072, T073, T074, T075
+
+## Tasks
+
+- [x] T072 [P] Add the multi-stage image in `deploy/Dockerfile`: `golang:1.27` build → `node:26-slim` runtime, sidecar installed at `/opt/zwave-sidecar`, non-root user, `/run/zwave-hub` tmpfs, USB access via `device_cgroup_rules` for char majors 188 and 166 with `group_add` for dialout
+  - Note: `deploy/Dockerfile` is three stages (`sidecar` node:26-slim for `npm ci --omit=dev`, then `build` golang:1.27, then the runtime `node:26-slim`), because the golang image carries no npm — the final image is still golang build → node runtime. Built and verified: `docker build -f deploy/Dockerfile .` succeeds (~508 MB), `/opt/zwave-sidecar/node_modules/@zwave-js/server/dist-esm/bin/server.js` present, `USER zwave` (uid 10001), `/data` and `/run/zwave-hub` owned by it, `dialout` GID 20 present, `/readyz` answers `{"status":"ready"}` under `--tmpfs /run/zwave-hub` with `ZWAVE_HUB_DRIVER_MODE=mock`, and `docker stop` exits cleanly. The device cgroup rules and `group_add` are runtime-only, so they are recorded as a comment plus two `LABEL`s and implemented in `deploy/compose.yaml` (T073).
+- [x] T073 [P] Add `deploy/compose.yaml`: `/dev:/dev:rslave`, dialout group, data volume, tmpfs `/run`, configuration from `deploy/zwave-hub.env.example`
+  - Note: long-form bind of `/dev` with `propagation: rslave`, `device_cgroup_rules` `c 188:* rmw` / `c 166:* rmw`, `group_add: ["${DIALOUT_GID:-20}"]`, named volume `zwave-data:/data`, `tmpfs: /run/zwave-hub:size=8m,mode=1777` (the tmpfs root is root-owned and the hub is non-root, so 1777 is what lets it create its 0600 files; the mount is private to the container), Node-based `/readyz` healthcheck, `stop_grace_period: 30s`, capped json-file logging. `docker compose -f deploy/compose.yaml config` passes.
+- [x] T074 [P] Add `deploy/zwave-hub.env.example` with the eight variables and the recommended `ZWAVE_HUB_MASTER_KEY` placement from quickstart.md §7.4
+  - Note: the eight `ZWAVE_HUB_*` variables in quickstart §2 order with the `internal/config` defaults, plus `DIALOUT_GID` (compose-time, same file because compose reads `deploy/.env` for interpolation and as the container env file). `ZWAVE_HUB_MASTER_KEY` is commented out with the `head -c 32 /dev/urandom | base64` command and the §7.4 advice (secret store, not the file). Validated with `. ./deploy/zwave-hub.env.example` under `sh -e` and a real boot to `/readyz`.
+- [x] T075 [P] Add metadata-read benchmarks in `internal/api/bench_test.go` and record p95 for `GET /coordinators`, `GET /keys` and `GET /network` against the 100 ms target
+  - Note: `internal/api/bench_test.go` adds `BenchmarkListCoordinators`, `BenchmarkGetKeyConfiguration`, `BenchmarkGetNetworkStatus` and `TestMetadataReadP95` (200 samples, nearest-rank p95, populated fixture: one selected+adopted coordinator and the four classic keys). Recorded on darwin/arm64: `GET /api/v1/coordinators` p95 0.008 ms, `GET /api/v1/keys` p95 0.104 ms, `GET /api/v1/network` p95 0.062 ms — all far inside the 100 ms target; benchmark ns/op 5.5 µs / 45 µs / 41 µs.
+- [ ] T076 Execute all ten scenarios in `specs/001-coordinator-key-provisioning/quickstart.md` §4 against the mock driver and, where a scenario requires it, real hardware; fix every discrepancy found
+- [ ] T077 Run `make rollback-check`: previous image against the same data volume, `PRAGMA user_version` forward and back, confirm the previous binary ignores new columns (constitution VII)
+- [ ] T078 Security hardening pass: child environment built from the allow-list only, `--disable-dns-sd` present, `ZWAVEJS_LOG_SECURITY_DETAILS` absent, `driver.shutdown` never sent, rendered config unlinked on stop
+- [ ] T079 Audit completeness pass over `internal/hub/commands.go` and `internal/store/audit.go`: every mutating operation, and every refused one, writes exactly one audit row with time, actor, action and outcome; export and reset tokens never appear in logs or audit rows (FR-019, SC-007)
+- [ ] T080 Reconcile `specs/001-coordinator-key-provisioning/data-model.md` §7 with the implemented audit action set, including the rejected-key action; add that action's row to `contracts/events.md` §4's audit-to-event pairing table and remove it from the not-audited list; reconcile §6 token rejection statuses with the clarified split (`410 confirmation_expired` for expired or used, `404 confirmation_invalid` for unknown or foreign address)
+- [ ] T081 Run `make test`, `make test-contract` and `make lint`, and record the result in the completion report; no target may be skipped or weakened (constitution V, X)
+- [ ] T082 [P] Add `.github/workflows/ci.yml` invoking `make build`, `make lint`, `make test` and `make test-contract` on pull requests and pushes to `main`, with no step logic outside the make targets (constitution X)
+- [ ] T083 Run the three-alert drill from `quickstart.md` §8.2 — unplug the stick, corrupt one key row with `UPDATE security_keys SET key_blob = x'00'`, kill the sidecar in a loop — and confirm each alert fires with its runbook (constitution VIII, IX)
+
+## Completion
+
+- [ ] `make test`, `make test-contract` and `make lint` all pass and their output is recorded in the commit message (T081).
+- [ ] `docker build -f deploy/Dockerfile .` succeeds; if Docker or a Linux host is unavailable, record exactly which of T076, T077 and T083 could not be executed and why, and leave those boxes unticked.
+- [ ] Do not tick T076, T077 or T083 unless they were actually executed; they require real hardware or a running container.
+- [ ] Verify all changes work as expected
+- [ ] Run `/speckit.analyze` to verify consistency
