@@ -114,6 +114,31 @@ func TestEmptyVariableIsUnset(t *testing.T) {
 	}
 }
 
+// TestRunDir proves the tmpfs path is configuration, not a constant: the image
+// keeps the /run/zwave-hub default, and a host without that tmpfs overrides it
+// rather than failing every start that has keys to render.
+func TestRunDir(t *testing.T) {
+	cfg, err := Load(nil, Env{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RunDir != DefaultRunDir {
+		t.Errorf("RunDir = %q, want the default %q", cfg.RunDir, DefaultRunDir)
+	}
+
+	cfg, err = Load(nil, Env{EnvRunDir: "/tmp/zwave-hub-run"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("Load with an override: %v", err)
+	}
+	if cfg.RunDir != "/tmp/zwave-hub-run" {
+		t.Errorf("RunDir = %q, want the environment value", cfg.RunDir)
+	}
+
+	if _, err := Load(nil, Env{EnvRunDir: "  "}, &bytes.Buffer{}); err == nil {
+		t.Error("a blank run directory was accepted")
+	}
+}
+
 func TestDiscoveryIntervalFloor(t *testing.T) {
 	for _, value := range []string{"499ms", "1ms", "0s"} {
 		_, err := Load(nil, Env{EnvDiscoveryInterval: value}, &bytes.Buffer{})

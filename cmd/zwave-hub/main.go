@@ -29,13 +29,14 @@ import (
 	"github.com/judeibe/zwave_hub/internal/store"
 )
 
-// Host paths. They are constants of the deployment, not configuration: the
-// image mounts tmpfs at /run/zwave-hub, and sysfs and dev are where Linux puts
-// them. Discovery takes them as injected values, so tests use fixture trees.
+// Host paths. They are constants of the deployment, not configuration: sysfs and
+// dev are where Linux puts them. Discovery takes them as injected values, so
+// tests use fixture trees. The run directory is configuration
+// (ZWAVE_HUB_RUN_DIR) because a host without the image's tmpfs needs another
+// one; the image and compose keep the /run/zwave-hub default.
 const (
 	sysRoot = "/sys"
 	devRoot = "/dev"
-	runDir  = "/run/zwave-hub"
 )
 
 // shutdownTimeout bounds the drain of in-flight requests. The store is closed
@@ -93,7 +94,7 @@ func run() error {
 	sup, err := driver.NewSupervisor(driver.Options{
 		SidecarDir: cfg.SidecarDir,
 		Mock:       cfg.DriverMode == config.DriverModeMock,
-		RunDir:     runDir,
+		RunDir:     cfg.RunDir,
 		CacheDir:   filepath.Join(cfg.DataDir, "zwave-cache"),
 		LogLevel:   "info",
 		Emitter:    emitter,

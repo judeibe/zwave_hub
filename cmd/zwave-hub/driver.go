@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/judeibe/zwave_hub/internal/coordinator"
@@ -32,6 +33,11 @@ type driverBridge struct {
 	signature string
 	// wake carries a settled discovery change to the reconciler.
 	wake chan struct{}
+	// keysChanged marks a committed key change whose restart has not run yet.
+	// It is an atomic, not a field under mu, because Apply is called from the
+	// supervisor's ready report while the reconciler may hold mu inside
+	// sup.Start, which waits for that very report to return.
+	keysChanged atomic.Bool
 }
 
 func newDriverBridge(h *hub.Hub) *driverBridge {
@@ -109,7 +115,28 @@ func (b *driverBridge) reconcile(ctx context.Context) {
 // Apply makes the bridge the hub's key applier: a committed key change restarts
 // only the child, which re-renders its config from the database (FR-012). The
 // supervisor ignores it when no child is being supervised.
-func (b *driverBridge) Apply(ctx context.Context) {
+//
+// The restart itself runs on the reconciler goroutine (applyKeys), never here.
+// Apply is called from the supervisor's ready report when first-activation
+// generation commits, and restarting inside that report would ask the
+// supervision loop to wait for a stop only it can complete.
+func (b *driverBridge) Apply(_ context.Context) {
+	b.keysChanged.Store(true)
+	select {
+	case b.wake <- struct{}{}:
+	default:
+	}
+}
+
+// applyKeys restarts the child when a committed revision has not been rendered
+// yet. With no child supervised the restart is a no-op and the flag is cleared:
+// the next start renders the committed keys anyway.
+func (b *driverBridge) applyKeys(ctx context.Context) {
+	if !b.keysChanged.Swap(false) {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.sup != nil {
 		b.sup.Apply(ctx)
 	}
@@ -127,6 +154,8 @@ func (b *driverBridge) keys(ctx context.Context) (driver.KeySet, error) {
 }
 
 func (b *driverBridge) stop() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.sup != nil {
 		b.sup.Stop()
 	}
@@ -232,6 +261,7 @@ func (b *driverBridge) run(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		b.reconcile(ctx)
+		b.applyKeys(ctx)
 		select {
 		case <-ctx.Done():
 			return

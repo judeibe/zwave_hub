@@ -26,6 +26,7 @@ const (
 	EnvDiscoveryInterval = "ZWAVE_HUB_DISCOVERY_INTERVAL"
 	EnvDriverMode        = "ZWAVE_HUB_DRIVER_MODE"
 	EnvSidecarDir        = "ZWAVE_HUB_SIDECAR_DIR"
+	EnvRunDir            = "ZWAVE_HUB_RUN_DIR"
 )
 
 // Defaults from quickstart.md §2. They are also what the container image and
@@ -38,6 +39,12 @@ const (
 	DefaultDiscoveryInterval = 2 * time.Second
 	DefaultDriverMode        = DriverModeHardware
 	DefaultSidecarDir        = "/opt/zwave-sidecar"
+
+	// DefaultRunDir is where the rendered driver config is written. In the
+	// image it is a tmpfs, because that file holds plaintext keys and must not
+	// land on the data volume; a development host without that tmpfs sets
+	// ZWAVE_HUB_RUN_DIR.
+	DefaultRunDir = "/run/zwave-hub"
 
 	// MinDiscoveryInterval is the floor quickstart.md §2 rejects. A faster poll
 	// costs sysfs reads forever and cannot make a plug-in visible sooner than
@@ -81,6 +88,9 @@ type Config struct {
 	DriverMode DriverMode
 	// SidecarDir is where @zwave-js/server is installed in the image.
 	SidecarDir string
+	// RunDir is where the rendered driver config is written. In the image it
+	// is a tmpfs, so plaintext keys never reach persistent storage.
+	RunDir string
 }
 
 // DestructiveOpsLabel is the value the events and the env example use.
@@ -144,6 +154,7 @@ func Load(args []string, env Env, out io.Writer) (*Config, error) {
 	flags.StringVar(&cfg.Bind, "bind", envOr(env, EnvBind, DefaultBind), "HTTP listen address (host:port)")
 	flags.StringVar(&cfg.DataDir, "data-dir", envOr(env, EnvDataDir, DefaultDataDir), "directory holding hub.db and the fallback master key")
 	flags.StringVar(&cfg.SidecarDir, "sidecar-dir", envOr(env, EnvSidecarDir, DefaultSidecarDir), "directory holding @zwave-js/server")
+	flags.StringVar(&cfg.RunDir, "run-dir", envOr(env, EnvRunDir, DefaultRunDir), "directory holding the rendered driver config")
 	logLevel := flags.String("log-level", envOr(env, EnvLogLevel, DefaultLogLevel), "event floor: debug, info, warn or error")
 	destructiveOps := flags.String("destructive-ops", envOr(env, EnvDestructiveOps, DefaultDestructiveOps), "enabled or disabled; disabled closes the network reset")
 	discoveryInterval := flags.String("discovery-interval", envOr(env, EnvDiscoveryInterval, DefaultDiscoveryInterval.String()), "sysfs poll period, at least 500ms")
@@ -166,6 +177,9 @@ func Load(args []string, env Env, out io.Writer) (*Config, error) {
 	}
 	if strings.TrimSpace(cfg.SidecarDir) == "" {
 		return nil, &ConfigError{Field: "sidecar-dir", Reason: "must not be empty"}
+	}
+	if strings.TrimSpace(cfg.RunDir) == "" {
+		return nil, &ConfigError{Field: "run-dir", Reason: "must not be empty"}
 	}
 
 	level, err := parseLogLevel(*logLevel)

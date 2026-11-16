@@ -81,11 +81,16 @@ lint: ## Check gofmt, go vet and the key-material scanner test
 
 # Development without hardware runs the same binary in the same mode the
 # contract tests use, against a throwaway data directory, so a mock run can
-# never touch a real installation.
+# never touch a real installation. ZWAVE_HUB_SIDECAR_DIR and ZWAVE_HUB_RUN_DIR
+# are set explicitly: the image defaults are /opt/zwave-sidecar and
+# /run/zwave-hub, which exist only inside the container. Without them a local
+# run fails with spawn_failed before any scenario can be exercised — the run
+# directory matters as soon as first activation renders a config file.
 run-mock: ## Run the hub with ZWAVE_HUB_DRIVER_MODE=mock on a temporary data directory
 	@data=$$(mktemp -d); \
 	echo "run-mock: data dir $$data"; \
 	ZWAVE_HUB_DRIVER_MODE=mock ZWAVE_HUB_DATA_DIR="$$data" ZWAVE_HUB_BIND="$(BIND)" \
+	ZWAVE_HUB_SIDECAR_DIR="$(CURDIR)/sidecar" ZWAVE_HUB_RUN_DIR="$$data/run" \
 		$(GO) run ./cmd/zwave-hub
 
 # The image is built from deploy/Dockerfile with no CI-only arguments, so the

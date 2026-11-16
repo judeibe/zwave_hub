@@ -330,6 +330,60 @@ func TestMigratedEvent(t *testing.T) {
 	}
 }
 
+// TestOpenCreatesMasterKey proves the production wiring: a hub started with no
+// ZWAVE_HUB_MASTER_KEY must still seal keys, which means Open has to resolve
+// the data directory's master.key rather than hand the crypto paths a nil key.
+func TestOpenCreatesMasterKey(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+
+	s, err := Open(ctx, Options{DataDir: dir})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	info, err := os.Stat(filepath.Join(dir, keyFileName))
+	if err != nil {
+		t.Fatalf("stat master.key: %v", err)
+	}
+	if got := info.Mode().Perm(); got != keyFileMode {
+		t.Errorf("master.key mode = %04o, want %04o", got, keyFileMode)
+	}
+
+	const class = "S0_Legacy"
+	plain := []byte("0123456789abcdef")
+	blob, err := s.SealKey(class, plain)
+	if err != nil {
+		t.Fatalf("SealKey without a supplied master key: %v", err)
+	}
+	opened, err := s.OpenKey(class, blob)
+	if err != nil {
+		t.Fatalf("OpenKey: %v", err)
+	}
+	if !bytes.Equal(opened, plain) {
+		t.Fatalf("OpenKey returned %x, want %x", opened, plain)
+	}
+
+	// Reopening the same directory must reuse the file: a regenerated key
+	// would strand the blob written above.
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	again, err := Open(ctx, Options{DataDir: dir})
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer func() { _ = again.Close() }()
+	reopened, err := again.OpenKey(class, blob)
+	if err != nil {
+		t.Fatalf("OpenKey after restart: %v", err)
+	}
+	if !bytes.Equal(reopened, plain) {
+		t.Fatalf("OpenKey after restart returned %x, want %x", reopened, plain)
+	}
+}
+
 func TestSealOpenRoundTrip(t *testing.T) {
 	ctx := t.Context()
 	dir := t.TempDir()

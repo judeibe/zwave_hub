@@ -75,6 +75,14 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("store: create data directory: %w", err)
 	}
+	// A supplied key wins; otherwise master.key in the data directory is read
+	// or created. Resolving it here is what makes a hub started without
+	// ZWAVE_HUB_MASTER_KEY able to seal keys at all: without this call the
+	// store carried no key and every sealing path failed with ErrNoMasterKey.
+	masterKey, err := LoadMasterKey(opts.DataDir, opts.MasterKey)
+	if err != nil {
+		return nil, err
+	}
 
 	db, err := sql.Open("sqlite", dataSourceName(filepath.Join(opts.DataDir, "hub.db")))
 	if err != nil {
@@ -85,7 +93,7 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 	s := &Store{
 		db:        db,
 		dataDir:   opts.DataDir,
-		masterKey: opts.MasterKey,
+		masterKey: masterKey,
 		emitter:   opts.Emitter,
 	}
 	// A connection that cannot even be established is evidence the file is
