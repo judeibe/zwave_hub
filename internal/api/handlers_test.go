@@ -324,6 +324,20 @@ func TestNewBodiesPassPresent(t *testing.T) {
 			ActorAddr: "192.0.2.1", RequestID: "r", CoordinatorID: "usb:10c4:ea60:aaa",
 			Detail: store.AuditDetail{Reason: "coordinator_network_mismatch", ExpectedHomeID: "0x00000001", ActualHomeID: "0x00000002"},
 		}}}),
+		"key configuration": presentKeyConfiguration(hub.KeyConfiguration{
+			Revision: 2, AppliedRevision: &applied, InEffect: true, ClassicComplete: true,
+			Classes: []hub.KeyClass{
+				{Class: "S0_Legacy", Configured: true, Source: store.KeySourceSupplied, CreatedAt: retry, ChangedAt: retry},
+				{Class: "S2_AccessControl"},
+			},
+			Warnings: []string{"a value is shared between a classic and a Long Range class"},
+			Apply:    &hub.KeyApply{Reason: hub.ApplyDriverRestartFailed, Message: "The driver could not be restarted."},
+		}),
+		"key export": presentKeyExport(hub.KeyExport{
+			HomeID: "0xdeadbeef", ExportedAt: retry,
+			Keys: map[string][]byte{"S0_Legacy": {0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+				0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}},
+		}),
 	}
 	for name, body := range bodies {
 		if _, err := Present(body); err != nil {
