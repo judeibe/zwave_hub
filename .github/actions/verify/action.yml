@@ -1,0 +1,24 @@
+name: Verify
+description: Install the toolchains and run every check as a make target, so CI runs what a developer runs.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "26"
+        cache: npm
+        cache-dependency-path: sidecar/package-lock.json
+    # `make build` installs sidecar/node_modules, which `make test-contract`
+    # needs, so it goes first.
+    - run: make build
+      shell: bash
+    - run: make lint
+      shell: bash
+    - run: make test
+      shell: bash
+    - run: make test-contract
+      shell: bash
