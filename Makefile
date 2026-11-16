@@ -13,6 +13,7 @@ SHELL := /bin/sh
 
 GO      ?= go
 BIN     ?= bin/zwave-hub
+VERSION ?= dev
 TAG     ?= dev
 BIND    ?= 0.0.0.0:8080
 IMAGE   ?= zwave-hub
@@ -33,7 +34,7 @@ help: ## List every target with a one-line description
 # the image's first stage installs. Anything built another way is not this one.
 build: ## Build the static Go binary and the sidecar's node_modules
 	@mkdir -p $(dir $(BIN))
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w" -o "$(BIN)" ./cmd/zwave-hub
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o "$(BIN)" ./cmd/zwave-hub
 	@if [ -f sidecar/package-lock.json ]; then \
 		cd sidecar && npm ci; \
 	else \
