@@ -49,6 +49,10 @@ const shutdownTimeout = 10 * time.Second
 // seconds of detection delay is invisible to it.
 const monitorInterval = 5 * time.Second
 
+// version is the release the binary was built from. The release build sets it
+// with -ldflags "-X main.version=<tag>"; any other build reports "dev".
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "zwave-hub: %v\n", err)
@@ -58,6 +62,10 @@ func main() {
 
 // run builds the graph and serves until SIGINT or SIGTERM.
 func run() error {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Println(version)
+		return nil
+	}
 	cfg, err := config.Load(os.Args[1:], config.Environ(), os.Stderr)
 	if err != nil {
 		return err

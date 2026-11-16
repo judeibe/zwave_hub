@@ -52,7 +52,8 @@ COPY internal/ internal/
 
 # The exact compile the Makefile's `build` target runs — the image must ship
 # that binary, not a differently-configured one.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/zwave-hub ./cmd/zwave-hub
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/zwave-hub ./cmd/zwave-hub
 
 # --- runtime stage ----------------------------------------------------------
 FROM node:26-slim
