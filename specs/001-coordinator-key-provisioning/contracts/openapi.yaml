@@ -747,6 +747,12 @@ components:
             - keys_not_in_effect
         message:
           type: string
+        last_path:
+          type: string
+          description: The selected stick's by-id path, for `coordinator_not_attached`.
+        reason:
+          type: string
+          description: The fault cause, for `coordinator_faulted` (data-model.md §8.3).
         classes:
           type: array
           items:
