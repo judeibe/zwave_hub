@@ -135,6 +135,73 @@ func TestSelectReadyAndNetworkStatus(t *testing.T) {
 	}
 }
 
+// blockingCodes returns the blocking reason codes of one network body.
+func blockingCodes(status map[string]any) []string {
+	reasons, _ := status["blocking_reasons"].([]any)
+	codes := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		if body, ok := reason.(map[string]any); ok {
+			code, _ := body["code"].(string)
+			codes = append(codes, code)
+		}
+	}
+	return codes
+}
+
+// TestNetworkReadyOnceKeysAreInEffect proves the readiness half of T051 end to
+// end: the first ready report of a zero-node coordinator generates the classic
+// set (FR-008), the network is degraded with keys_not_in_effect until the driver
+// reports the revision running, and from then on it reports ready for secure
+// inclusion with no blocking reason and keys.in_effect true.
+func TestNetworkReadyOnceKeysAreInEffect(t *testing.T) {
+	f := newHandlerFixture(t)
+	ctx := context.Background()
+	dev := device("aaa")
+	if err := f.hub.SyncDiscovery(ctx, []coordinator.Device{dev}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := f.do("PUT", "/api/v1/active-coordinator", `{"coordinator_id":"`+dev.Identity.ID+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("select status %d: %s", rec.Code, rec.Body)
+	}
+	if err := f.hub.Adopt(ctx, dev.Identity.ID, hub.Identified{Network: hub.Network{HomeID: "0x00000001"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	revision := f.hub.CommittedKeyRevision()
+	if revision != 1 {
+		t.Fatalf("first activation committed revision %d, want the automatically generated classic set", revision)
+	}
+	degraded := decode(t, f.do("GET", "/api/v1/network", ""))
+	if degraded["state"] != "degraded" || degraded["ready_for_secure_inclusion"] != false {
+		t.Fatalf("stored but not applied: state %v ready %v", degraded["state"], degraded["ready_for_secure_inclusion"])
+	}
+	if codes := blockingCodes(degraded); len(codes) != 1 || codes[0] != "keys_not_in_effect" {
+		t.Fatalf("stored but not applied: blocking reasons %v, want keys_not_in_effect", codes)
+	}
+
+	// The driver's ready report carrying the revision it started with is what
+	// makes the set in effect; the fixture has no supervisor, so the report is
+	// made directly, as the bridge would make it.
+	if err := f.hub.NoteKeysApplied(ctx, dev.Identity.ID, revision, "0x00000001", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	status := decode(t, f.do("GET", "/api/v1/network", ""))
+	if status["state"] != "ready" || status["ready_for_secure_inclusion"] != true {
+		t.Fatalf("applied: state %v ready %v", status["state"], status["ready_for_secure_inclusion"])
+	}
+	if codes := blockingCodes(status); len(codes) != 0 {
+		t.Fatalf("applied: blocking reasons %v, want none", codes)
+	}
+	keys, _ := status["keys"].(map[string]any)
+	if keys["in_effect"] != true || keys["classic_complete"] != true || keys["applied_revision"] != keys["revision"] {
+		t.Fatalf("applied: keys %v", keys)
+	}
+	if configured, _ := keys["configured_classes"].([]any); len(configured) != 4 {
+		t.Fatalf("applied: configured_classes %v, want the four classic classes", keys["configured_classes"])
+	}
+}
+
 func TestSelectProblems(t *testing.T) {
 	f := newHandlerFixture(t)
 	cases := []struct {
