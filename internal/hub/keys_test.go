@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -406,5 +407,104 @@ func TestInUseErrorNamesResetPath(t *testing.T) {
 	}
 	if !strings.Contains(message, "POST /api/v1/network/reset") {
 		t.Errorf("the refusal message %q does not name POST /api/v1/network/reset", message)
+	}
+}
+
+// TestInvalidKeyWorkIsAudited proves FR-019 attributes refused key work: a
+// submission or a generation the validation refuses writes exactly one
+// keys.rejected row naming the code and the classes, the stored set is unchanged
+// and the row carries no part of the submitted value (FR-013, FR-019, SC-009).
+func TestInvalidKeyWorkIsAudited(t *testing.T) {
+	ctx := context.Background()
+	const invalidValue = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+	const unknownClass = "S9_Bogus"
+	cases := []struct {
+		name      string
+		refuse    func(*Hub) error
+		classes   []string
+		forbidden string
+	}{
+		{
+			name: "submitted value",
+			refuse: func(h *Hub) error {
+				_, err := h.SubmitKeys(ctx, KeySubmission{
+					Keys:      map[string]string{SecurityClassS2AccessControl: invalidValue},
+					RequestID: "req-invalid-value",
+					ActorAddr: testActorAddr,
+				})
+				return err
+			},
+			classes:   []string{SecurityClassS2AccessControl},
+			forbidden: invalidValue,
+		},
+		{
+			name: "generated unknown class",
+			refuse: func(h *Hub) error {
+				_, err := h.GenerateKeys(ctx, KeyGeneration{
+					Classes:   []string{unknownClass},
+					RequestID: "req-unknown-class",
+					ActorAddr: testActorAddr,
+				})
+				return err
+			},
+			classes: []string{unknownClass},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, st := newTestHub(t)
+			mustConfigureKey(t, h, SecurityClassS0Legacy, testKeyValue("kept"), "req-configure")
+			before, err := h.Keys(ctx)
+			if err != nil {
+				t.Fatalf("read the key configuration: %v", err)
+			}
+			rowsBefore := len(auditRows(t, st))
+
+			err = tc.refuse(h)
+			var invalid *ValidationError
+			if !errors.As(err, &invalid) {
+				t.Fatalf("the refused work returned %v, want a *ValidationError", err)
+			}
+
+			after, err := h.Keys(ctx)
+			if err != nil {
+				t.Fatalf("read the key configuration after the refusal: %v", err)
+			}
+			if after.Revision != before.Revision {
+				t.Errorf("the key revision moved from %d to %d: a refusal writes nothing", before.Revision, after.Revision)
+			}
+			if _, err := st.GetKey(ctx, SecurityClassS2AccessControl); !errors.Is(err, store.ErrNotFound) {
+				t.Errorf("S2_AccessControl is stored after the refusal, want no row (err %v)", err)
+			}
+
+			rows := auditRows(t, st)
+			if got := len(rows) - rowsBefore; got != 1 {
+				t.Fatalf("the refused work wrote %d audit rows, want exactly 1", got)
+			}
+			row := rows[0]
+			if row.Action != store.AuditKeysRejected || row.Outcome != store.OutcomeRejected {
+				t.Errorf("the audit row is %s/%s, want %s/%s",
+					row.Action, row.Outcome, store.AuditKeysRejected, store.OutcomeRejected)
+			}
+			if row.Detail.Reason != CodeInvalidKeyMaterial {
+				t.Errorf("the audit row records reason %q, want %q", row.Detail.Reason, CodeInvalidKeyMaterial)
+			}
+			if !slices.Equal(row.Detail.Classes, tc.classes) {
+				t.Errorf("the audit row names classes %v, want %v", row.Detail.Classes, tc.classes)
+			}
+			if row.ActorAddr != testActorAddr {
+				t.Errorf("the audit row records actor %q, want %q", row.ActorAddr, testActorAddr)
+			}
+			if row.RequestID == "" {
+				t.Error("the audit row carries no request id")
+			}
+			detail, err := json.Marshal(row.Detail)
+			if err != nil {
+				t.Fatalf("marshal the audit detail: %v", err)
+			}
+			if tc.forbidden != "" && strings.Contains(string(detail), tc.forbidden) {
+				t.Errorf("the audit detail %s carries the refused value: a row never holds key material", detail)
+			}
+		})
 	}
 }

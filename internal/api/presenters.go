@@ -450,6 +450,94 @@ type networkStatusBody struct {
 type blockingReasonBody struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// The rest are the members the reason's code calls for, and are absent
+	// otherwise (data-model.md §8.3).
+	Classes         []string `json:"classes,omitempty"`
+	HomeID          string   `json:"home_id,omitempty"`
+	NodeCount       int      `json:"node_count,omitempty"`
+	ExpectedHomeID  string   `json:"expected_home_id,omitempty"`
+	ActualHomeID    string   `json:"actual_home_id,omitempty"`
+	KeyRevision     *int     `json:"key_revision,omitempty"`
+	AppliedRevision *int     `json:"applied_revision,omitempty"`
+	LastPath        string   `json:"last_path,omitempty"`
+	Reason          string   `json:"reason,omitempty"`
+}
+
+// presentBlockingReason maps one blocking reason to the contract shape. Only the
+// members its code calls for are set, so a client reading keys_missing is never
+// handed a key_revision it could act on by mistake.
+func presentBlockingReason(reason hub.BlockingReason) blockingReasonBody {
+	body := blockingReasonBody{Code: string(reason.Code), Message: reason.Message}
+	switch reason.Code {
+	case hub.BlockingKeyStoreCorrupt, hub.BlockingKeysMissing:
+		body.Classes = reason.Classes
+	case hub.BlockingCoordinatorNotAttached:
+		body.LastPath = reason.LastPath
+	case hub.BlockingCoordinatorFaulted:
+		body.Reason = reason.Reason
+	case hub.BlockingNetworkMismatch:
+		body.ExpectedHomeID = reason.ExpectedHomeID
+		body.ActualHomeID = reason.ActualHomeID
+	case hub.BlockingExistingNetworkDetected:
+		body.HomeID = reason.HomeID
+		body.NodeCount = reason.NodeCount
+	case hub.BlockingKeysNotInEffect:
+		body.KeyRevision = &reason.KeyRevision
+		body.AppliedRevision = reason.AppliedRevision
+	}
+	return body
+}
+
+// confirmationChallengeBody is contracts/openapi.yaml ConfirmationChallenge.
+type confirmationChallengeBody struct {
+	Operation string `json:"operation"`
+	Token     string `json:"token"`
+	ExpiresAt string `json:"expires_at"`
+	Message   string `json:"message"`
+}
+
+// resetResultBody is contracts/openapi.yaml ResetResult.
+type resetResultBody struct {
+	State         string           `json:"state"`
+	ResetAt       string           `json:"reset_at"`
+	CoordinatorID *string          `json:"coordinator_id"`
+	HomeIDBefore  *string          `json:"home_id_before"`
+	Cleared       resetClearedBody `json:"cleared"`
+	Message       string           `json:"message"`
+}
+
+// resetClearedBody is the cleared object of ResetResult: what the reset
+// discarded.
+type resetClearedBody struct {
+	Keys              bool `json:"keys"`
+	NetworkMembership bool `json:"network_membership"`
+}
+
+// presentResetChallenge is the 202 body of the two-step reset. It hands the
+// caller the token and says plainly that nothing has been reset.
+func presentResetChallenge(challenge hub.ResetChallenge) confirmationChallengeBody {
+	return confirmationChallengeBody{
+		Operation: resetOperation,
+		Token:     challenge.Token,
+		ExpiresAt: timestamp(challenge.ExpiresAt),
+		Message:   "Repeat the request with this token to reset the network. Nothing has been reset yet.",
+	}
+}
+
+// presentResetResult is the 200 body of a completed reset: the unprovisioned
+// state and what was cleared.
+func presentResetResult(result hub.ResetResult) resetResultBody {
+	return resetResultBody{
+		State:         string(result.State),
+		ResetAt:       timestamp(result.ResetAt),
+		CoordinatorID: optional(result.CoordinatorID),
+		HomeIDBefore:  optional(result.HomeIDBefore),
+		Cleared: resetClearedBody{
+			Keys:              result.KeysCleared,
+			NetworkMembership: result.NetworkMembershipCleared,
+		},
+		Message: "The network was reset. Every securely included device has to be included again.",
+	}
 }
 
 type keysBody struct {
@@ -458,6 +546,65 @@ type keysBody struct {
 	InEffect          bool     `json:"in_effect"`
 	ClassicComplete   bool     `json:"classic_complete"`
 	ConfiguredClasses []string `json:"configured_classes"`
+}
+
+// keyConfigurationBody is contracts/openapi.yaml KeyConfiguration: the metadata
+// view a submission, a generation and GetKeyConfiguration all return. It has no
+// member a key value could reach, and apply is rendered as null when the stored
+// revision is the one running (FR-013).
+type keyConfigurationBody struct {
+	Revision        int            `json:"revision"`
+	AppliedRevision *int           `json:"applied_revision"`
+	InEffect        bool           `json:"in_effect"`
+	ClassicComplete bool           `json:"classic_complete"`
+	Classes         []keyClassBody `json:"classes"`
+	Warnings        []string       `json:"warnings"`
+	Apply           *keyApplyBody  `json:"apply"`
+}
+
+// keyClassBody is one class's metadata. The source and the two times are
+// present only for a configured class.
+type keyClassBody struct {
+	Class      string  `json:"class"`
+	Configured bool    `json:"configured"`
+	Source     *string `json:"source,omitempty"`
+	CreatedAt  *string `json:"created_at,omitempty"`
+	ChangedAt  *string `json:"changed_at,omitempty"`
+}
+
+// keyApplyBody names why a committed revision is not running.
+type keyApplyBody struct {
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+}
+
+// presentKeyConfiguration maps the hub's metadata view to the contract shape.
+// Every class is listed whether it is configured or not, and the warnings are
+// rendered as [] rather than null so a client can iterate them unconditionally.
+func presentKeyConfiguration(cfg hub.KeyConfiguration) keyConfigurationBody {
+	body := keyConfigurationBody{
+		Revision:        cfg.Revision,
+		AppliedRevision: cfg.AppliedRevision,
+		InEffect:        cfg.InEffect,
+		ClassicComplete: cfg.ClassicComplete,
+		Classes:         make([]keyClassBody, 0, len(cfg.Classes)),
+		Warnings:        make([]string, 0, len(cfg.Warnings)),
+	}
+	body.Warnings = append(body.Warnings, cfg.Warnings...)
+	for _, class := range cfg.Classes {
+		entry := keyClassBody{Class: class.Class, Configured: class.Configured}
+		if class.Configured {
+			source := string(class.Source)
+			created := timestamp(class.CreatedAt)
+			changed := timestamp(class.ChangedAt)
+			entry.Source, entry.CreatedAt, entry.ChangedAt = &source, &created, &changed
+		}
+		body.Classes = append(body.Classes, entry)
+	}
+	if cfg.Apply != nil {
+		body.Apply = &keyApplyBody{Reason: string(cfg.Apply.Reason), Message: cfg.Apply.Message}
+	}
+	return body
 }
 
 type keyStoreBody struct {

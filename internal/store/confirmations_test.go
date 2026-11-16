@@ -168,8 +168,8 @@ func TestConsumeConfirmationOnce(t *testing.T) {
 		t.Error("consumed_at is NULL after a successful redemption")
 	}
 
-	if err := s.ConsumeConfirmation(ctx, issued.Token, ConfirmationKeysExport, actor, at); !errors.Is(err, ErrConfirmationInvalid) {
-		t.Fatalf("second ConsumeConfirmation = %v, want ErrConfirmationInvalid", err)
+	if err := s.ConsumeConfirmation(ctx, issued.Token, ConfirmationKeysExport, actor, at); !errors.Is(err, ErrConfirmationUnusable) {
+		t.Fatalf("second ConsumeConfirmation = %v, want ErrConfirmationUnusable", err)
 	}
 }
 
@@ -183,8 +183,8 @@ func TestConsumeConfirmationExpiry(t *testing.T) {
 	t.Run("exactly at expiry", func(t *testing.T) {
 		issued := issueTestConfirmation(t, s, ConfirmationNetworkReset, "192.0.2.10", base)
 		at := issued.IssuedAt.Add(ConfirmationTTL)
-		if err := s.ConsumeConfirmation(ctx, issued.Token, ConfirmationNetworkReset, "192.0.2.10", at); !errors.Is(err, ErrConfirmationInvalid) {
-			t.Fatalf("consume at the expiry instant = %v, want ErrConfirmationInvalid", err)
+		if err := s.ConsumeConfirmation(ctx, issued.Token, ConfirmationNetworkReset, "192.0.2.10", at); !errors.Is(err, ErrConfirmationUnusable) {
+			t.Fatalf("consume at the expiry instant = %v, want ErrConfirmationUnusable", err)
 		}
 	})
 
@@ -207,16 +207,16 @@ func TestConsumeConfirmationOperationBinding(t *testing.T) {
 	at := base.Add(time.Second)
 
 	export := issueTestConfirmation(t, s, ConfirmationKeysExport, actor, base)
-	if err := s.ConsumeConfirmation(ctx, export.Token, ConfirmationNetworkReset, actor, at); !errors.Is(err, ErrConfirmationInvalid) {
-		t.Fatalf("keys.export token presented as network.reset = %v, want ErrConfirmationInvalid", err)
+	if err := s.ConsumeConfirmation(ctx, export.Token, ConfirmationNetworkReset, actor, at); !errors.Is(err, ErrConfirmationInvalid) || errors.Is(err, ErrConfirmationUnusable) {
+		t.Fatalf("keys.export token presented as network.reset = %v, want ErrConfirmationInvalid alone", err)
 	}
 	if err := s.ConsumeConfirmation(ctx, export.Token, ConfirmationKeysExport, actor, at); err != nil {
 		t.Fatalf("keys.export token presented as keys.export after a refused attempt: %v", err)
 	}
 
 	reset := issueTestConfirmation(t, s, ConfirmationNetworkReset, actor, base)
-	if err := s.ConsumeConfirmation(ctx, reset.Token, ConfirmationKeysExport, actor, at); !errors.Is(err, ErrConfirmationInvalid) {
-		t.Fatalf("network.reset token presented as keys.export = %v, want ErrConfirmationInvalid", err)
+	if err := s.ConsumeConfirmation(ctx, reset.Token, ConfirmationKeysExport, actor, at); !errors.Is(err, ErrConfirmationInvalid) || errors.Is(err, ErrConfirmationUnusable) {
+		t.Fatalf("network.reset token presented as keys.export = %v, want ErrConfirmationInvalid alone", err)
 	}
 	if err := s.ConsumeConfirmation(ctx, reset.Token, ConfirmationNetworkReset, actor, at); err != nil {
 		t.Fatalf("network.reset token presented as network.reset after a refused attempt: %v", err)
@@ -231,16 +231,17 @@ func TestConsumeConfirmationActorBinding(t *testing.T) {
 	base := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
 	issued := issueTestConfirmation(t, s, ConfirmationKeysExport, "192.0.2.10", base)
 
-	if err := s.ConsumeConfirmation(ctx, issued.Token, ConfirmationKeysExport, "192.0.2.11", base.Add(time.Second)); !errors.Is(err, ErrConfirmationInvalid) {
-		t.Fatalf("token presented from 192.0.2.11 = %v, want ErrConfirmationInvalid", err)
+	if err := s.ConsumeConfirmation(ctx, issued.Token, ConfirmationKeysExport, "192.0.2.11", base.Add(time.Second)); !errors.Is(err, ErrConfirmationInvalid) || errors.Is(err, ErrConfirmationUnusable) {
+		t.Fatalf("token presented from 192.0.2.11 = %v, want ErrConfirmationInvalid alone", err)
 	}
 	if err := s.ConsumeConfirmation(ctx, issued.Token, ConfirmationKeysExport, "192.0.2.10", base.Add(2*time.Second)); err != nil {
 		t.Fatalf("token presented from its own address after a refused attempt: %v", err)
 	}
 }
 
-// TestConsumeConfirmationUnknownToken proves an unissued token is refused the
-// same way as an expired or consumed one, so the two are indistinguishable.
+// TestConsumeConfirmationUnknownToken proves a token that was never issued reads
+// as invalid rather than unusable: it cannot have expired or been spent, so a
+// client is told to start the flow over, not to retry with a token it never had.
 func TestConsumeConfirmationUnknownToken(t *testing.T) {
 	ctx := t.Context()
 	s := openTestStore(t)
@@ -248,8 +249,8 @@ func TestConsumeConfirmationUnknownToken(t *testing.T) {
 
 	// A well-formed token that was never issued.
 	unknown := base64.RawURLEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
-	if err := s.ConsumeConfirmation(ctx, unknown, ConfirmationKeysExport, "192.0.2.10", base); !errors.Is(err, ErrConfirmationInvalid) {
-		t.Fatalf("consume of an unknown token = %v, want ErrConfirmationInvalid", err)
+	if err := s.ConsumeConfirmation(ctx, unknown, ConfirmationKeysExport, "192.0.2.10", base); !errors.Is(err, ErrConfirmationInvalid) || errors.Is(err, ErrConfirmationUnusable) {
+		t.Fatalf("consume of an unknown token = %v, want ErrConfirmationInvalid alone", err)
 	}
 }
 

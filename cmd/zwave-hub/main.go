@@ -148,6 +148,7 @@ func run() error {
 	})
 	api.NewCoordinators(h).Mount(router)
 	api.NewNetwork(h).Mount(router)
+	api.NewKeys(h).Mount(router)
 	api.NewConfirmations(h, cfg.DestructiveOps).Mount(router)
 	api.NewAudit(st).Mount(router)
 

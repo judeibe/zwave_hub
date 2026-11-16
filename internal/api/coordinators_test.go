@@ -148,8 +148,13 @@ func TestSelectMockCoordinatorReachesReady(t *testing.T) {
 	}
 
 	status := decode(t, f.do("GET", "/api/v1/network", ""))
-	if status["state"] != "ready" {
-		t.Errorf("network state = %v, want ready", status["state"])
+	// The coordinator is ready, but no keys are configured, so the derived
+	// state is degraded until the classic set exists (data-model.md §8.2).
+	if status["state"] != "degraded" {
+		t.Errorf("network state = %v, want degraded", status["state"])
+	}
+	if status["ready_for_secure_inclusion"] != false {
+		t.Errorf("ready_for_secure_inclusion = %v, want false without keys", status["ready_for_secure_inclusion"])
 	}
 	if status["home_id"] == nil || status["home_id"] != "0x00000001" {
 		t.Errorf("network home_id = %v, want 0x00000001", status["home_id"])

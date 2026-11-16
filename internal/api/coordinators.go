@@ -127,7 +127,7 @@ func selectionProblem(err error) *Problem {
 		case hub.CodeCoordinatorNetworkMismatch:
 			return NewProblem(CodeCoordinatorNetworkMismatch,
 				"The replacement reports a different network than the one holding secure devices. "+
-					"Reset the network with DELETE /api/v1/network to start over, or attach the original coordinator.")
+					"Reset the network with POST /api/v1/network/reset to start over, or attach the original coordinator.")
 		case hub.CodeAmbiguousIdentity:
 			return NewProblem(CodeCoordinatorUnsupported,
 				"More than one attached device claims that identity, so it cannot be selected safely.")

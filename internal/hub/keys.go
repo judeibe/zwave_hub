@@ -212,9 +212,10 @@ func (h *Hub) SubmitKeys(ctx context.Context, req KeySubmission) (KeyConfigurati
 		return KeyConfiguration{}, fmt.Errorf("hub: %q is not a key submission mode", req.Mode)
 	}
 
+	reqID := req.keyRequest()
 	decoded, warnings, err := ValidateKeys(req.Keys)
 	if err != nil {
-		return KeyConfiguration{}, err
+		return KeyConfiguration{}, h.refuseInvalid(ctx, reqID, err)
 	}
 	defer wipeKeyValues(decoded)
 
@@ -224,10 +225,10 @@ func (h *Hub) SubmitKeys(ctx context.Context, req KeySubmission) (KeyConfigurati
 			// The closed problem set of contracts/openapi.yaml has one 422 code
 			// for a submission that cannot be stored as written; the missing
 			// classes name what has to be added.
-			return KeyConfiguration{}, &ValidationError{Code: CodeInvalidKeyMaterial, Classes: missing}
+			return KeyConfiguration{}, h.refuseInvalid(ctx, reqID,
+				&ValidationError{Code: CodeInvalidKeyMaterial, Classes: missing})
 		}
 	}
-	reqID := req.keyRequest()
 	if err := h.refuseInUse(ctx, reqID, classes, mode == KeyModeReplace); err != nil {
 		return KeyConfiguration{}, err
 	}
@@ -259,6 +260,13 @@ func (h *Hub) SubmitKeys(ctx context.Context, req KeySubmission) (KeyConfigurati
 // Like a submission, a generation that would replace a key protecting an
 // included device is refused (FR-014, FR-021).
 func (h *Hub) GenerateKeys(ctx context.Context, req KeyGeneration) (KeyConfiguration, error) {
+	reqID := req.keyRequest()
+	for _, class := range req.Classes {
+		if !knownClass(class) {
+			return KeyConfiguration{}, h.refuseInvalid(ctx, reqID,
+				&ValidationError{Code: CodeInvalidKeyMaterial, Classes: []string{class}})
+		}
+	}
 	classes, err := GenerateClasses(req.Classes)
 	if err != nil {
 		return KeyConfiguration{}, err
@@ -266,7 +274,6 @@ func (h *Hub) GenerateKeys(ctx context.Context, req KeyGeneration) (KeyConfigura
 	if err := h.refuseCorruptStore(ctx); err != nil {
 		return KeyConfiguration{}, err
 	}
-	reqID := req.keyRequest()
 	if err := h.refuseInUse(ctx, reqID, classes, false); err != nil {
 		return KeyConfiguration{}, err
 	}
@@ -292,6 +299,39 @@ func (h *Hub) GenerateKeys(ctx context.Context, req KeyGeneration) (KeyConfigura
 	h.applyCommitted(ctx)
 
 	return h.keyConfiguration(ctx, nil)
+}
+
+// refuseInvalid audits a submission or generation the validation refused
+// (FR-019): one keys.rejected row naming the code and the classes, and nothing
+// else changes. It returns err for the caller to hand back, or the failure to
+// write the row when that is what went wrong. Only a *ValidationError is
+// audited; any other error passes through, because it is not a refusal of the
+// operator's input. The row carries class names, never a submitted value.
+func (h *Hub) refuseInvalid(ctx context.Context, req keyRequest, err error) error {
+	var invalid *ValidationError
+	if !errors.As(err, &invalid) {
+		return err
+	}
+	_, auditErr := h.worker.Submit(ctx, Command[provisioning]{
+		Audit: store.AuditEntry{
+			Action:     store.AuditKeysRejected,
+			Outcome:    store.OutcomeRejected,
+			ActorAddr:  req.actorAddr,
+			ActorLabel: req.actorLabel,
+			RequestID:  req.requestID,
+			Detail: store.AuditDetail{
+				Reason:  invalid.Code,
+				Classes: slices.Clone(invalid.Classes),
+			},
+		},
+		Apply: func(ctx context.Context, tx *store.Tx) (provisioning, error) {
+			return committedIn(ctx, tx)
+		},
+	})
+	if auditErr != nil {
+		return fmt.Errorf("hub: record the refused key submission: %w", auditErr)
+	}
+	return err
 }
 
 // refuseInUse applies the FR-014 gate: a change may not replace a key that

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/judeibe/zwave_hub/internal/hub"
@@ -8,7 +9,7 @@ import (
 
 // NetworkService is the part of the hub the network handler reads.
 type NetworkService interface {
-	Snapshot() hub.Snapshot
+	NetworkStatus(ctx context.Context) (hub.NetworkStatus, error)
 }
 
 // Network serves the network status resource.
@@ -26,71 +27,69 @@ func (n *Network) Mount(rt *Router) {
 	rt.Handle("GET /api/v1/network", http.HandlerFunc(n.getNetworkStatus))
 }
 
-// getNetworkStatus reports state, the coordinator's connection and its
-// membership for the US1 scope. Key fields report the empty state until the key
-// phases land, so the shape is already the contract's.
+// getNetworkStatus reports the derived network status: the state of
+// data-model.md §8.2, the readiness derivation behind it with its blocking
+// reasons (data-model.md §8.3), and the key metadata both are read from.
 func (n *Network) getNetworkStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, r, http.StatusOK, buildNetworkStatus(n.svc.Snapshot()))
+	status, err := n.svc.NetworkStatus(r.Context())
+	if err != nil {
+		WriteProblem(w, r, NewProblem(CodeInternalError, "The network status could not be read."))
+		return
+	}
+	writeJSON(w, r, http.StatusOK, buildNetworkStatus(status))
 }
 
-// buildNetworkStatus derives the state of data-model.md §8.2 from a snapshot.
-func buildNetworkStatus(snap hub.Snapshot) networkStatusBody {
+// buildNetworkStatus maps the hub's derived status to the contract shape. The
+// state and the readiness come from the same derivation, so a state of ready
+// always carries ready_for_secure_inclusion true and the reverse.
+func buildNetworkStatus(status hub.NetworkStatus) networkStatusBody {
 	body := networkStatusBody{
-		BlockingReasons: []blockingReasonBody{},
+		State:                   string(status.State),
+		ReadyForSecureInclusion: status.Readiness.Ready,
+		BlockingReasons:         make([]blockingReasonBody, 0, len(status.Readiness.BlockingReasons)),
+		ActiveCoordinatorID:     optional(status.ActiveID),
+		HomeID:                  optional(status.HomeID),
+		NodeCount:               status.NodeCount,
+		SecureNodeCount:         status.SecureNodeCount,
 		Keys: keysBody{
-			Revision:          snap.KeyRevision,
-			ConfiguredClasses: []string{},
+			Revision:          status.Keys.Revision,
+			AppliedRevision:   status.Keys.AppliedRevision,
+			InEffect:          status.Keys.InEffect,
+			ClassicComplete:   status.Keys.ClassicComplete,
+			ConfiguredClasses: configuredClasses(status.Keys),
 		},
-		KeyStore: keyStoreBody{State: "ok", Classes: []string{}},
-		Driver:   driverBody{State: "stopped"},
+		KeyStore: keyStoreBody{State: string(status.KeyStore), Classes: emptyClasses(status.CorruptClasses)},
+		Driver:   driverBody{State: driverState(status.Connection)},
 	}
-	body.ActiveCoordinatorID = optional(snap.ActiveID)
-	body.HomeID = optional(snap.HomeID)
-
-	active, found := findCoordinator(snap, snap.ActiveID)
-	switch {
-	case snap.ActiveID == "" || !found:
-		body.State = "unprovisioned"
-		body.BlockingReasons = append(body.BlockingReasons, blockingReasonBody{
-			Code: "no_active_coordinator", Message: "No coordinator is selected.",
-		})
-	default:
-		body.Driver.State = driverState(active.Connection)
-		if active.LastError != nil {
-			body.Driver.LastError = &lastErrorBody{
-				Code: active.LastError.Code, Message: active.LastError.Message, At: timestamp(active.LastError.At),
-			}
-		}
-		if active.Network != nil && active.Connection == hub.ConnectionReady {
-			body.NodeCount = active.Network.NodeCount
-			body.SecureNodeCount = active.Network.SecureNodeCount
-		}
-		switch active.Connection {
-		case hub.ConnectionReady:
-			body.State = "ready"
-		case hub.ConnectionFaulted:
-			body.State = "faulted"
-			body.BlockingReasons = append(body.BlockingReasons, blockingReasonBody{
-				Code: "coordinator_faulted", Message: "The coordinator is present but the driver cannot start.",
-			})
-		case hub.ConnectionNotAttached:
-			body.State = "awaiting_coordinator"
-			body.BlockingReasons = append(body.BlockingReasons, blockingReasonBody{
-				Code: "coordinator_not_attached", Message: "The selected coordinator is not attached.",
-			})
-		default:
-			body.State = "awaiting_coordinator"
-			body.BlockingReasons = append(body.BlockingReasons, blockingReasonBody{
-				Code: "coordinator_not_attached", Message: "The selected coordinator is not ready yet.",
-			})
-		}
+	for _, reason := range status.Readiness.BlockingReasons {
+		body.BlockingReasons = append(body.BlockingReasons, presentBlockingReason(reason))
 	}
-	if snap.ActiveID != "" {
-		body.BlockingReasons = append(body.BlockingReasons, blockingReasonBody{
-			Code: "keys_missing", Message: "No security keys are configured yet.",
-		})
+	if status.LastError != nil {
+		body.Driver.LastError = &lastErrorBody{
+			Code: status.LastError.Code, Message: status.LastError.Message, At: timestamp(status.LastError.At),
+		}
 	}
 	return body
+}
+
+// configuredClasses lists the classes that hold a key, in canonical order, as an
+// empty list rather than null so a client can iterate it unconditionally.
+func configuredClasses(keys hub.KeyConfiguration) []string {
+	classes := make([]string, 0, len(keys.Classes))
+	for _, class := range keys.Classes {
+		if class.Configured {
+			classes = append(classes, class.Class)
+		}
+	}
+	return classes
+}
+
+// emptyClasses renders a nil list of classes as the empty list.
+func emptyClasses(classes []string) []string {
+	if classes == nil {
+		return []string{}
+	}
+	return classes
 }
 
 // driverState maps a coordinator connection to the driver states of the

@@ -47,6 +47,8 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 	rt := NewRouter(Options{})
 	NewCoordinators(h).Mount(rt)
 	NewNetwork(h).Mount(rt)
+	NewKeys(h).Mount(rt)
+	NewConfirmations(h, true).Mount(rt)
 	NewAudit(st).Mount(rt)
 	return &handlerFixture{hub: h, store: st, router: rt}
 }
@@ -126,7 +128,9 @@ func TestSelectReadyAndNetworkStatus(t *testing.T) {
 		t.Fatalf("network = %v", active["network"])
 	}
 	status := decode(t, f.do("GET", "/api/v1/network", ""))
-	if status["state"] != "ready" || status["home_id"] != "0x00000001" {
+	// A ready coordinator with no keys is degraded, not ready: readiness needs
+	// the classic set configured and in effect (data-model.md §8.2, §8.3).
+	if status["state"] != "degraded" || status["home_id"] != "0x00000001" {
 		t.Fatalf("status = %v", status)
 	}
 }
@@ -216,10 +220,38 @@ func TestNewBodiesPassPresent(t *testing.T) {
 		Network: &hub.Network{HomeID: "0xdeadbeef", NodeCount: 3, SecureNodeCount: 2},
 	}
 	snap := hub.Snapshot{Coordinators: []hub.Coordinator{coordinatorFull}, ActiveID: coordinatorFull.ID, HomeID: "0xdeadbeef"}
+	applied := 2
+	networkStatus := hub.NetworkStatus{
+		State: hub.NetworkFaulted,
+		Readiness: hub.Readiness{BlockingReasons: []hub.BlockingReason{
+			{Code: hub.BlockingKeyStoreCorrupt, Message: "x", Classes: []string{"S0_Legacy"}},
+			{Code: hub.BlockingNoActiveCoordinator, Message: "x"},
+			{Code: hub.BlockingCoordinatorNotAttached, Message: "x", LastPath: "/dev/serial/by-id/x"},
+			{Code: hub.BlockingCoordinatorFaulted, Message: "x", Reason: "driver_start_failed"},
+			{Code: hub.BlockingNetworkMismatch, Message: "x", ExpectedHomeID: "0x00000001", ActualHomeID: "0x00000002"},
+			{Code: hub.BlockingExistingNetworkDetected, Message: "x", HomeID: "0xdeadbeef", NodeCount: 3},
+			{Code: hub.BlockingKeysMissing, Message: "x", Classes: []string{"S2_AccessControl"}},
+			{Code: hub.BlockingKeysNotInEffect, Message: "x", KeyRevision: 2, AppliedRevision: &applied},
+		}},
+		Keys: hub.KeyConfiguration{
+			Revision: 2, AppliedRevision: &applied, InEffect: true, ClassicComplete: true,
+			Classes: []hub.KeyClass{{Class: "S0_Legacy", Configured: true, Source: store.KeySourceSupplied}},
+		},
+		KeyStore:        hub.KeyStoreCorrupt,
+		CorruptClasses:  []string{"S0_Legacy"},
+		ActiveID:        coordinatorFull.ID,
+		HomeID:          "0xdeadbeef",
+		NodeCount:       3,
+		SecureNodeCount: 2,
+		Connection:      hub.ConnectionReady,
+		LastError:       &hub.LastError{Code: "driver_start_failed", Message: "x", At: retry},
+	}
 	bodies := map[string]any{
 		"coordinator": presentCoordinator(coordinatorFull),
 		"list":        presentCoordinatorList(snap),
-		"network":     buildNetworkStatus(snap),
+		"network":     buildNetworkStatus(networkStatus),
+		"reset":       presentResetResult(hub.ResetResult{State: hub.ResetStateUnprovisioned, ResetAt: retry, CoordinatorID: coordinatorFull.ID, HomeIDBefore: "0xdeadbeef", KeysCleared: true, NetworkMembershipCleared: true}),
+		"challenge":   presentResetChallenge(hub.ResetChallenge{Token: "Kq3-9mZtYbVn0aFwLxPcRdSuHeGjTkNmQrWvXyZa-BC", ExpiresAt: retry}),
 		"audit": presentAuditPage(store.AuditPage{Items: []store.AuditEntry{{
 			ID: 1, At: retry, Action: store.AuditCoordinatorRejected, Outcome: store.OutcomeRejected,
 			ActorAddr: "192.0.2.1", RequestID: "r", CoordinatorID: "usb:10c4:ea60:aaa",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -17,6 +18,14 @@ import (
 // caller cannot tell a token that never existed from one that has aged out or
 // been pruned (data-model.md §6).
 var ErrConfirmationInvalid = errors.New("store: confirmation token is invalid")
+
+// ErrConfirmationUnusable is the invalid token that was issued for the
+// presented operation and address and can no longer be redeemed: it has expired,
+// or it has already been used. It wraps ErrConfirmationInvalid, so a caller that
+// only needs "refused" keeps testing for the sentinel, while a caller that must
+// tell an expired token (410) from an unknown one (404) tests this one with
+// errors.Is (FR-013, contracts/openapi.yaml).
+var ErrConfirmationUnusable = fmt.Errorf("%w: it has expired or was already used", ErrConfirmationInvalid)
 
 // ConfirmationOperation names an action a confirmation token can authorize. The
 // set is closed: a token is valid only for the operation it was issued for, so a
@@ -141,10 +150,11 @@ func (s *Store) IssueConfirmation(ctx context.Context, op ConfirmationOperation,
 
 // ConsumeConfirmation redeems a token for the operation and address it was
 // issued for and marks the row consumed. It returns ErrConfirmationInvalid for
-// an unknown, expired, already consumed or mismatched token, and leaves the row
-// untouched: a spent row is never reused and a refused attempt costs nothing, so
-// the legitimate holder can still redeem. The expiry instant itself is too late;
-// the window is half-open, [issued_at, expires_at).
+// an unknown or foreign token and ErrConfirmationUnusable for one that was
+// issued for this operation and address but has expired or been consumed, and
+// leaves the row untouched either way: a spent row is never reused and a refused
+// attempt costs nothing, so the legitimate holder can still redeem. The expiry
+// instant itself is too late; the window is half-open, [issued_at, expires_at).
 func (s *Store) ConsumeConfirmation(ctx context.Context, token string, op ConfirmationOperation, actorAddr string, now time.Time) error {
 	if token == "" {
 		return ErrConfirmationInvalid
@@ -156,7 +166,7 @@ func (s *Store) ConsumeConfirmation(ctx context.Context, token string, op Confir
 
 	// One conditional statement is the whole check. The row must match all four
 	// bindings — token, operation, address and an unredeemed, unexpired window —
-	// or nothing is written and the caller sees the sentinel.
+	// or nothing is written and the caller sees a sentinel.
 	res, err := s.db.ExecContext(ctx, `UPDATE confirmations SET consumed_at = ?
 		WHERE token_hash = ? AND operation = ? AND actor_addr = ?
 			AND consumed_at IS NULL AND expires_at > ?`,
@@ -169,9 +179,29 @@ func (s *Store) ConsumeConfirmation(ctx context.Context, token string, op Confir
 		return fmt.Errorf("store: read consumed confirmations: %w", err)
 	}
 	if consumed == 0 {
-		return ErrConfirmationInvalid
+		return s.classifyConfirmation(ctx, token, op, actorAddr)
 	}
 	return nil
+}
+
+// classifyConfirmation tells a token that was never issued to this caller, or
+// was issued for another operation, from one that was issued and has since
+// expired or been used. It repeats the three bindings the UPDATE checked and
+// ignores the two it failed: a row that exists for this token, operation and
+// address can only have been refused for its window or its consumption state.
+// The query runs on the refusal path alone.
+func (s *Store) classifyConfirmation(ctx context.Context, token string, op ConfirmationOperation, actorAddr string) error {
+	var one int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM confirmations
+		WHERE token_hash = ? AND operation = ? AND actor_addr = ?`,
+		confirmationTokenHash(token), string(op), actorAddr).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrConfirmationInvalid
+	}
+	if err != nil {
+		return fmt.Errorf("store: classify confirmation: %w", err)
+	}
+	return ErrConfirmationUnusable
 }
 
 // PruneConfirmations deletes rows whose expiry is more than ConfirmationRetention

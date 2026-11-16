@@ -47,6 +47,7 @@ func openRestartFixture(t *testing.T, dataDir string) *restartFixture {
 	rt := NewRouter(Options{})
 	NewCoordinators(h).Mount(rt)
 	NewNetwork(h).Mount(rt)
+	NewKeys(h).Mount(rt)
 	NewAudit(st).Mount(rt)
 
 	f := &restartFixture{
@@ -118,7 +119,8 @@ func TestRestartRestoresSelectionAndReady(t *testing.T) {
 		t.Fatalf("adopt: %v", err)
 	}
 	assertBody(t, "before restart", first.do("GET", "/api/v1/network", ""),
-		wantField{"state", "ready"},
+		wantField{"state", "degraded"},
+		wantField{"ready_for_secure_inclusion", false},
 		wantField{"active_coordinator_id", dev.Identity.ID},
 		wantField{"home_id", homeID},
 	)
@@ -187,7 +189,8 @@ func TestRestartRestoresSelectionAndReady(t *testing.T) {
 		t.Errorf("after re-plug: network %v, want home id %s", active["network"], homeID)
 	}
 	assertBody(t, "after re-plug", second.do("GET", "/api/v1/network", ""),
-		wantField{"state", "ready"},
+		wantField{"state", "degraded"},
+		wantField{"ready_for_secure_inclusion", false},
 		wantField{"active_coordinator_id", dev.Identity.ID},
 		wantField{"home_id", homeID},
 	)
@@ -239,8 +242,11 @@ func TestRemovalAndReturnKeepsReady(t *testing.T) {
 		if network, _ := active["network"].(map[string]any); network["home_id"] != homeID {
 			t.Errorf("%s: network %v, want home id %s", what, active["network"], homeID)
 		}
+		// The coordinator is ready but no keys are configured, so the derived
+		// state is degraded and secure inclusion is not ready yet.
 		assertBody(t, what, f.do("GET", "/api/v1/network", ""),
-			wantField{"state", "ready"},
+			wantField{"state", "degraded"},
+			wantField{"ready_for_secure_inclusion", false},
 			wantField{"active_coordinator_id", dev.Identity.ID},
 			wantField{"home_id", homeID},
 		)

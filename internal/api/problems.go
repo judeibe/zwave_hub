@@ -107,13 +107,13 @@ func (c Code) Status() int {
 	case CodeInvalidKeyMaterial, CodeDuplicateKeyMaterial:
 		return http.StatusUnprocessableEntity // 422
 	case CodeKeyInUse, CodeCoordinatorUnsupported, CodeCoordinatorNetworkMismatch,
-		CodeNoActiveCoordinator:
+		CodeNoActiveCoordinator, CodeCoordinatorUnreachable:
 		return http.StatusConflict // 409
 	case CodeCoordinatorNotFound, CodeConfirmationInvalid:
 		return http.StatusNotFound // 404
 	case CodeConfirmationExpired:
 		return http.StatusGone // 410
-	case CodeCoordinatorUnreachable, CodeKeyStoreCorrupt, CodeDestructiveOpsDisabled,
+	case CodeKeyStoreCorrupt, CodeDestructiveOpsDisabled,
 		CodeCommandQueueFull, CodeDriverNotReady:
 		return http.StatusServiceUnavailable // 503
 	case CodeInvalidRequest:
