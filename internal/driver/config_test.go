@@ -34,7 +34,7 @@ func TestWriteConfigModesAndRemove(t *testing.T) {
 		}
 	}
 	if strings.Contains(string(body), "securityKeys") {
-		t.Fatal("config carries security keys before any exist")
+		t.Fatal("config carries security keys although the spec has none")
 	}
 	other, err := WriteConfig(dir, ConfigSpec{CacheDir: "/x"})
 	if err != nil {
@@ -64,5 +64,51 @@ func TestRenderConfigEscapesPaths(t *testing.T) {
 	}
 	if _, err := RenderConfig(ConfigSpec{}); err == nil {
 		t.Fatal("empty cache dir accepted")
+	}
+}
+
+func repeatByte(b byte) []byte {
+	out := make([]byte, 16)
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}
+
+func TestRenderConfigKeysAsBuffers(t *testing.T) {
+	source, err := RenderConfig(ConfigSpec{
+		CacheDir:  "/c",
+		Keys:      map[string][]byte{"S0_Legacy": repeatByte(0xab), "S2_Authenticated": repeatByte(0x01)},
+		LongRange: map[string][]byte{"S2_Authenticated_LR": repeatByte(0x02)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`securityKeys: {`,
+		`S0_Legacy: Buffer.from("abababababababababababababababab", "hex"),`,
+		`S2_Authenticated: Buffer.from("01010101010101010101010101010101", "hex"),`,
+		`securityKeysLongRange: {`,
+		`S2_Authenticated_LR: Buffer.from("02020202020202020202020202020202", "hex"),`,
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("config lacks %q:\n%s", want, source)
+		}
+	}
+	// Absent classes are omitted, not written empty.
+	for _, absent := range []string{"S2_AccessControl:", "S2_Unauthenticated:", "S2_AccessControl_LR:"} {
+		if strings.Contains(source, absent) {
+			t.Fatalf("config writes absent class %q:\n%s", absent, source)
+		}
+	}
+}
+
+func TestRenderConfigOmitsEmptyLongRangeSet(t *testing.T) {
+	source, err := RenderConfig(ConfigSpec{CacheDir: "/c", Keys: map[string][]byte{"S0_Legacy": repeatByte(1)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(source, "securityKeysLongRange") {
+		t.Fatalf("empty Long Range set rendered:\n%s", source)
 	}
 }
