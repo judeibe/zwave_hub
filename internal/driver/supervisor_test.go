@@ -639,3 +639,117 @@ func TestSupervisorRecordsChildOutputRedacted(t *testing.T) {
 		t.Fatalf("the secret-looking line leaked into the event stream: %q", logs)
 	}
 }
+
+// TestCommandEnvironmentIsAllowListed pins the child's launch contract of the
+// T078 hardening pass: the environment is exactly the four allow-listed
+// variables, so nothing from the hub's own environment (the master key, the
+// security-log switch, any secret an operator exported) reaches node, and the
+// child is started without mDNS advertisement.
+func TestCommandEnvironmentIsAllowListed(t *testing.T) {
+	t.Setenv("ZWAVEJS_LOG_SECURITY_DETAILS", "true")
+	t.Setenv("ZWAVE_HUB_MASTER_KEY", "canary-master-key")
+	t.Setenv("T078_CANARY", "canary")
+
+	sup, err := NewSupervisor(Options{
+		SidecarDir: t.TempDir(),
+		RunDir:     t.TempDir(),
+		CacheDir:   t.TempDir(),
+		Report:     func(context.Context, Report) {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := sup.command(context.Background(), Target{CoordinatorID: "usb:10c4:ea60:abc", SerialPath: "/dev/serial/by-id/usb-abc"}, 3000, "/run/cfg.json")
+
+	want := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"NODE_ENV=production",
+		"TZ=UTC",
+		"HOME=/nonexistent",
+	}
+	if !slices.Equal(cmd.Env, want) {
+		t.Errorf("child environment = %v, want exactly %v", cmd.Env, want)
+	}
+	for _, kv := range cmd.Env {
+		for _, forbidden := range []string{"ZWAVEJS_LOG_SECURITY_DETAILS", "ZWAVE_HUB_MASTER_KEY", "T078_CANARY"} {
+			if strings.HasPrefix(kv, forbidden+"=") {
+				t.Errorf("%s leaked into the child environment", forbidden)
+			}
+		}
+	}
+	if !slices.Contains(cmd.Args, "--disable-dns-sd") {
+		t.Errorf("child arguments %v lack --disable-dns-sd", cmd.Args)
+	}
+	if i := slices.Index(cmd.Args, "--host"); i < 0 || i+1 >= len(cmd.Args) || cmd.Args[i+1] != "127.0.0.1" {
+		t.Errorf("child arguments %v do not bind to 127.0.0.1", cmd.Args)
+	}
+}
+
+// TestRenderedConfigIsPrivateAndRemoved proves the rendered key file is
+// owner-only while the child runs and is gone once the supervisor stops, so a
+// stopped hub leaves no key material under the run directory.
+func TestRenderedConfigIsPrivateAndRemoved(t *testing.T) {
+	sidecar := sidecarDir(t)
+	nodePath, argsFile := nodeArgShim(t)
+	rep := newReports()
+	runDir := t.TempDir()
+
+	sup, err := NewSupervisor(Options{
+		SidecarDir: sidecar,
+		NodePath:   nodePath,
+		Mock:       true,
+		RunDir:     runDir,
+		CacheDir:   t.TempDir(),
+		Keys: func(context.Context) (KeySet, error) {
+			return KeySet{Revision: 1, Keys: map[string][]byte{"S0_Legacy": bytes.Repeat([]byte{0x33}, 16)}}, nil
+		},
+		Report: rep.add,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup.Start(context.Background(), Target{CoordinatorID: "usb:10c4:ea60:abc"})
+	rep.waitFor(t, ConnectionReady, 30*time.Second)
+
+	path := configArg(t, argsFile)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("the rendered config is missing while the child runs: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		t.Errorf("rendered config mode = %o, want owner-only", mode)
+	}
+
+	sup.Stop()
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("rendered config still present after Stop: %v", err)
+	}
+}
+
+// TestDriverShutdownIsNeverSent pins the hardening rule that the hub ends the
+// child with a signal and never over the socket: driver.shutdown would put the
+// Z-Wave API into shutdown and, on some sticks, leave it unresponsive.
+func TestDriverShutdownIsNeverSent(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		contents, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(contents), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") {
+				continue
+			}
+			if strings.Contains(line, "driver.shutdown") {
+				t.Errorf("%s:%d sends driver.shutdown: %s", name, i+1, trimmed)
+			}
+		}
+	}
+}
