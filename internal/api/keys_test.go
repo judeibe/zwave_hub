@@ -555,3 +555,105 @@ func TestKeysMetadataReadsCarryNoKeyValues(t *testing.T) {
 	}
 	keysTestAssertNoHexRun(t, "GET /api/v1/network", network)
 }
+
+// TestKeysExportNeedsTheTwoStepConfirmation proves the export contract of
+// contracts/openapi.yaml and the playbook's completion section (FR-013, FR-019):
+// the first call returns a token and no value, the second returns the values,
+// the audit trail records the export without them, and a spent or foreign token
+// is refused.
+func TestKeysExportNeedsTheTwoStepConfirmation(t *testing.T) {
+	f := newHandlerFixture(t)
+	ctx := context.Background()
+	submitted := map[string]string{
+		hub.SecurityClassS2Authenticated: "00112233445566778899aabbccddeeff",
+		hub.SecurityClassS0Legacy:        "ffeeddccbbaa99887766554433221100",
+	}
+	if rec := f.do("PUT", "/api/v1/keys", keysTestSubmissionBody(t, "", submitted)); rec.Code != http.StatusOK {
+		t.Fatalf("submit status %d: %s", rec.Code, rec.Body)
+	}
+
+	// Step one: 202, a token, and no value anywhere in the body.
+	challenge := f.do("POST", "/api/v1/keys/export", "")
+	if challenge.Code != http.StatusAccepted {
+		t.Fatalf("export step one status %d, want 202", challenge.Code)
+	}
+	challengeBody := decode(t, challenge)
+	token, _ := challengeBody["token"].(string)
+	if token == "" {
+		t.Fatal("export step one returned no token")
+	}
+	if challengeBody["operation"] != "keys.export" {
+		t.Errorf("export step one operation = %v, want keys.export", challengeBody["operation"])
+	}
+	if _, has := challengeBody["keys"]; has {
+		t.Error("export step one carries a keys member, want none")
+	}
+	for class, value := range submitted {
+		if strings.Contains(strings.ToLower(challenge.Body.String()), value) {
+			t.Errorf("export step one body carries the value of %s", class)
+		}
+	}
+
+	// A token nobody issued is 404, and does not spend the real one.
+	if rec := f.do("POST", "/api/v1/keys/export", `{"confirm_token":"not-a-real-token"}`); rec.Code != http.StatusNotFound {
+		t.Errorf("export with an unknown token status %d, want 404", rec.Code)
+	} else if code := decode(t, rec)["code"]; code != string(CodeConfirmationInvalid) {
+		t.Errorf("export with an unknown token code %v, want %s", code, CodeConfirmationInvalid)
+	}
+
+	// Step two: the values, exactly as stored.
+	exported := f.do("POST", "/api/v1/keys/export", `{"confirm_token":"`+token+`"}`)
+	if exported.Code != http.StatusOK {
+		t.Fatalf("export step two status %d, want 200", exported.Code)
+	}
+	body := decode(t, exported)
+	keys, _ := body["keys"].(map[string]any)
+	for class, value := range submitted {
+		if got, _ := keys[class].(string); !strings.EqualFold(got, value) {
+			t.Errorf("export step two: the value for %s is absent or differs from the stored one", class)
+		}
+	}
+	if len(keys) != len(submitted) {
+		t.Errorf("export step two carries %d classes, want %d: only configured classes are exported", len(keys), len(submitted))
+	}
+	if body["exported_at"] == nil || body["warning"] == nil {
+		t.Errorf("export step two lacks exported_at or warning: %v", body)
+	}
+
+	// The token is single use.
+	replay := f.do("POST", "/api/v1/keys/export", `{"confirm_token":"`+token+`"}`)
+	if replay.Code != http.StatusGone {
+		t.Errorf("export replay status %d, want 410", replay.Code)
+	} else if code := decode(t, replay)["code"]; code != string(CodeConfirmationExpired) {
+		t.Errorf("export replay code %v, want %s", code, CodeConfirmationExpired)
+	}
+
+	// The three outcomes are on record and none of them holds a value.
+	page, err := f.store.ListAudit(ctx, store.AuditQuery{Limit: 200})
+	if err != nil {
+		t.Fatalf("list the audit trail: %v", err)
+	}
+	seen := map[store.AuditAction]int{}
+	for _, entry := range page.Items {
+		seen[entry.Action]++
+		switch entry.Action {
+		case store.AuditKeysExportRequested, store.AuditKeysExported, store.AuditKeysExportRejected:
+			text := strings.ToLower(entry.ActorAddr + entry.ActorLabel + entry.CoordinatorID + entry.SecurityClass + string(entry.Outcome))
+			detail, _ := json.Marshal(entry.Detail)
+			text += strings.ToLower(string(detail))
+			for class, value := range submitted {
+				if strings.Contains(text, value) {
+					t.Errorf("audit row %s carries the value of %s", entry.Action, class)
+				}
+			}
+			if regexp.MustCompile(keysTestKeyValueShape).MatchString(text) {
+				t.Errorf("audit row %s carries a key-shaped run", entry.Action)
+			}
+		}
+	}
+	for _, action := range []store.AuditAction{store.AuditKeysExportRequested, store.AuditKeysExported, store.AuditKeysExportRejected} {
+		if seen[action] == 0 {
+			t.Errorf("the audit trail holds no %s row", action)
+		}
+	}
+}

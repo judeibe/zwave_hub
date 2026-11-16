@@ -59,8 +59,14 @@ Delegate each task in a batch to its own sub-agent, concurrently:
 
 ## Completion
 
-- [ ] `go test ./...` and `make test-contract` pass, including `internal/api/redaction_test.go` (SC-004).
+- [x] `go test ./...` and `make test-contract` pass, including `internal/api/redaction_test.go` (SC-004). Verified: `go test ./... -count=1` and `go test ./internal/... -race` pass, `make test-contract` runs the real mock sidecar plus the T055 fixtures, and `make lint` (`TestNoKeyMaterial*`) passes.
 - [x] US2 independent test: from a selected mock coordinator with no keys, observe automatic generation of the four classic keys (zero-node guard), then `GET /api/v1/network` reports `ready_for_secure_inclusion: true`; restart the hub and confirm the same. Done: `TestUS2KeysSurviveARestart` in `internal/api/restart_test.go` (the driver's applied-revision report is made directly, since the fixture runs no supervisor).
-- [ ] Export: first call returns a token and no values; second call with the token returns values and writes an audit row without them.
-- [ ] Verify all changes work as expected
-- [ ] Run `/speckit.analyze` to verify consistency
+- [x] Export: first call returns a token and no values; second call with the token returns values and writes an audit row without them. Done: `TestKeysExportNeedsTheTwoStepConfirmation` in `internal/api/keys_test.go` (202 with token and `operation: keys.export`, 404 unknown token, 200 values, 410 replay, `keys.export_requested|exported|export_rejected` rows holding no value), and the same path inside `TestNoKeyMaterialNeverLeavesTheAPI`.
+- [x] Verify all changes work as expected. Verified: gofmt clean, `go vet` clean (including `-tags contract`), `go test ./internal/... -race` and `make test-contract` and `make lint` pass; every T047–T056 commit was built and tested in a clean worktree or against the full suite.
+- [x] Run `/speckit.analyze` to verify consistency. Done (read-only, no extension hooks registered): 83 tasks in tasks.md; FR-001, FR-002, FR-007, FR-009, FR-010, FR-020 and SC-005 are covered by tasks without citing the ID, no TODO or clarification markers remain, and the rejected-work audit actions (`keys.rejected`, `network.reset_rejected`) are consistent across data-model.md §7, openapi.yaml and events.md §4. Open findings: (1) tasks.md checkboxes are mostly unticked (10 of 83) because progress is recorded in the playbooks, so reconcile them in T080/T081; (2) plan.md:43 still says reset and export are both behind `ZWAVE_HUB_DESTRUCTIVE_OPS`, while the implemented contract gates only `resetNetwork` (already assigned to T080); (3) none of the findings is CRITICAL.
+
+## Manual Follow-Up (not executed by Auto Run)
+
+- Real-device run of the key export, the in-use refusal (FR-014) and secure-node readiness with a physical coordinator that has securely included devices. The mock driver always reports an empty network, so these paths are proven here only through the T055 recorded-payload fixtures and hub-level tests that report secure nodes directly.
+- Confirm on a Linux host with a real stick that a key change restarts only the `zwave-server` child, the hub keeps serving the API throughout, and `GET /api/v1/network` returns to `ready_for_secure_inclusion: true` once `start_listening` succeeds.
+- Reconcile `plan.md:43` (export gating) and the unticked `tasks.md` checkboxes as part of T080/T081.
