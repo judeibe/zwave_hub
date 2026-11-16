@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/judeibe/zwave_hub/internal/coordinator"
 	"github.com/judeibe/zwave_hub/internal/hub"
@@ -211,6 +212,101 @@ func TestRestartRestoresSelectionAndReady(t *testing.T) {
 	// for a field that never turns true. Add it here, against this network
 	// body's keys.in_effect and bounded by the 20 s p95 of plan.md §Performance
 	// Goals, once those three pieces land.
+}
+
+// TestUS2KeysSurviveARestart is the US2 independent test of the playbook's
+// completion section: from a selected coordinator with no keys, the first ready
+// report of a stick that carries no network generates the four classic keys
+// (FR-008, the zero-node guard), the network reports ready for secure
+// inclusion, and a full restart of the hub comes back with the same set and
+// the same readiness.
+//
+// The fixture runs no supervisor, so the report that says the child came back
+// with the revision is made directly, exactly as Adopt stands in for the
+// driver's ready report.
+func TestUS2KeysSurviveARestart(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	dev := device("aaa")
+	const homeID = "0x00000001"
+
+	first := openRestartFixture(t, dataDir)
+	if err := first.hub.SyncDiscovery(ctx, []coordinator.Device{dev}); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	if rec := first.do("PUT", "/api/v1/active-coordinator", `{"coordinator_id":"`+dev.Identity.ID+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("select status %d: %s", rec.Code, rec.Body)
+	}
+	// The driver's ready report on a stick with no network: nothing is
+	// configured, so the hub generates the classic set (FR-008).
+	if err := first.hub.Adopt(ctx, dev.Identity.ID, hub.Identified{Network: hub.Network{HomeID: homeID}}); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	revision := first.hub.CommittedKeyRevision()
+	if revision != 1 {
+		t.Fatalf("the committed key revision is %d, want the automatically generated classic set", revision)
+	}
+	if err := first.hub.NoteKeysApplied(ctx, dev.Identity.ID, revision, homeID, time.Now()); err != nil {
+		t.Fatalf("note the applied revision: %v", err)
+	}
+
+	assertBody(t, "before restart", first.do("GET", "/api/v1/network", ""),
+		wantField{"state", "ready"},
+		wantField{"ready_for_secure_inclusion", true},
+		wantField{"home_id", homeID},
+	)
+	assertClassicSet(t, "before restart", first.do("GET", "/api/v1/keys", ""))
+	first.close(t)
+
+	// The second lifetime reads the same database. Nothing is generated again:
+	// the set is on record, so the trigger's preconditions no longer hold.
+	second := openRestartFixture(t, dataDir)
+	if err := second.hub.SyncDiscovery(ctx, []coordinator.Device{dev}); err != nil {
+		t.Fatalf("restart sync: %v", err)
+	}
+	if err := second.hub.Adopt(ctx, dev.Identity.ID, hub.Identified{Network: hub.Network{HomeID: homeID}}); err != nil {
+		t.Fatalf("re-adopt: %v", err)
+	}
+	if got := second.hub.CommittedKeyRevision(); got != revision {
+		t.Errorf("the key revision after the restart is %d, want %d: the set is not generated twice", got, revision)
+	}
+	assertBody(t, "after restart", second.do("GET", "/api/v1/network", ""),
+		wantField{"state", "ready"},
+		wantField{"ready_for_secure_inclusion", true},
+		wantField{"home_id", homeID},
+	)
+	assertClassicSet(t, "after restart", second.do("GET", "/api/v1/keys", ""))
+}
+
+// assertClassicSet proves the four classic classes are configured and the Long
+// Range pair is not: the automatic generation provisions the classic set alone
+// (FR-008), and a client can tell the two apart from the metadata alone.
+func assertClassicSet(t *testing.T, what string, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s: keys status %d: %s", what, rec.Code, rec.Body)
+	}
+	body := decode(t, rec)
+	classes, _ := body["classes"].([]any)
+	configured := map[string]bool{}
+	for _, entry := range classes {
+		class, _ := entry.(map[string]any)
+		name, _ := class["class"].(string)
+		configured[name], _ = class["configured"].(bool)
+	}
+	for _, class := range []string{"S2_AccessControl", "S2_Authenticated", "S2_Unauthenticated", "S0_Legacy"} {
+		if !configured[class] {
+			t.Errorf("%s: %s is not configured, want the classic set: %v", what, class, configured)
+		}
+	}
+	for _, class := range []string{"S2_Authenticated_LR", "S2_AccessControl_LR"} {
+		if configured[class] {
+			t.Errorf("%s: %s is configured, want no Long Range key: %v", what, class, configured)
+		}
+	}
+	if body["classic_complete"] != true {
+		t.Errorf("%s: classic_complete = %v, want true", what, body["classic_complete"])
+	}
 }
 
 // TestRemovalAndReturnKeepsReady is the US3 independent test of the playbook's

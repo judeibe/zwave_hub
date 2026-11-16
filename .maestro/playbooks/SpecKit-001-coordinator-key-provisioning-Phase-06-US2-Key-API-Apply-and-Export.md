@@ -60,7 +60,7 @@ Delegate each task in a batch to its own sub-agent, concurrently:
 ## Completion
 
 - [ ] `go test ./...` and `make test-contract` pass, including `internal/api/redaction_test.go` (SC-004).
-- [ ] US2 independent test: from a selected mock coordinator with no keys, observe automatic generation of the four classic keys (zero-node guard), then `GET /api/v1/network` reports `ready_for_secure_inclusion: true`; restart the hub and confirm the same.
+- [x] US2 independent test: from a selected mock coordinator with no keys, observe automatic generation of the four classic keys (zero-node guard), then `GET /api/v1/network` reports `ready_for_secure_inclusion: true`; restart the hub and confirm the same. Done: `TestUS2KeysSurviveARestart` in `internal/api/restart_test.go` (the driver's applied-revision report is made directly, since the fixture runs no supervisor).
 - [ ] Export: first call returns a token and no values; second call with the token returns values and writes an audit row without them.
 - [ ] Verify all changes work as expected
 - [ ] Run `/speckit.analyze` to verify consistency
