@@ -127,10 +127,12 @@ One row per issued token. Shared by the backup export (FR-013) and the network r
 |---|---|---|---|
 | `token_hash` | text | primary key | SHA-256 hex of the token. The token itself is never stored. |
 | `operation` | text | `keys.export` \| `network.reset` | A token is only valid for the operation it was issued for. |
-| `actor_addr` | text | not null | The address that requested it; a token presented from another address is `confirmation_invalid`. |
+| `actor_addr` | text | not null | The address that requested it; a token presented from another address is `404 confirmation_invalid`. |
 | `issued_at` | text | RFC 3339 UTC | |
 | `expires_at` | text | RFC 3339 UTC | `issued_at + 120 s`. |
 | `consumed_at` | text | nullable | Set when the operation runs; a consumed token is never valid again. |
+
+**Rejection statuses.** A token that was issued to the presenting address for this operation but can no longer be used — expired, or `consumed_at` already set — is `410 confirmation_expired`. A token that is unknown, issued for the other operation, or issued to a different address is `404 confirmation_invalid`; the response does not say which, so a foreign address learns nothing about whether a token exists. The store reports the first case as `ErrConfirmationUnusable` and the second as `ErrConfirmationInvalid`, and the audit row of a refused presentation carries the same code in `detail.reason`.
 
 Rows older than 24 hours are deleted on startup and once per hour. A token presented after deletion is `confirmation_invalid` (404), which is indistinguishable from a token that never existed — the intended behaviour.
 
@@ -161,13 +163,13 @@ Append-only. No update path and no delete path exists in the code; the table is 
 | `coordinator.rejected` | a selection is refused | `rejected` |
 | `keys.replaced` | a submission is committed | `succeeded` |
 | `keys.generated` | generated keys are committed | `succeeded` |
-| `keys.rejected` | a submission or a generation is refused — a class in use by securely included devices, or a validation failure | `rejected` |
+| `keys.rejected` | a submission or a generation is refused — a class in use by securely included devices (`detail.reason` `key_in_use`), or a validation failure (`detail.reason` is the validation code). `detail.classes` names the classes and never a value. | `rejected` |
 | `keys.apply_failed` | the driver did not come back with the new revision | `failed` |
 | `keys.export_requested` | a confirmation token is issued | `succeeded` |
 | `keys.exported` | the confirmed export returns values | `succeeded` |
-| `keys.export_rejected` | a bad, expired or consumed token | `rejected` |
+| `keys.export_rejected` | a token that is unknown or foreign (`detail.reason` `confirmation_invalid`) or expired or consumed (`confirmation_expired`) | `rejected` |
 | `network.reset_requested` | a confirmation token is issued | `succeeded` |
-| `network.reset_rejected` | a reset is presented with a bad, expired or consumed token | `rejected` |
+| `network.reset_rejected` | a reset is presented with a token that is unknown or foreign (`detail.reason` `confirmation_invalid`) or expired or consumed (`confirmation_expired`) | `rejected` |
 | `network.reset` | the reset completes | `succeeded` |
 | `network.reset_failed` | the driver reset fails | `failed` |
 

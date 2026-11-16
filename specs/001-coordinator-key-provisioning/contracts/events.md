@@ -139,7 +139,7 @@ Every field named in a row is always present on that event. Optional context com
 | `keys.corrupt` | error | `classes`, `detected_by` (`aead` \| `integrity_check`). **Alert trigger.** |
 | `keys.export_requested` | info | `operation`, `expires_at` |
 | `keys.exported` | warn | `classes`, `home_id`. `warn` because exporting key material is worth noticing. |
-| `keys.export_rejected` | warn | `reason` (`invalid` \| `expired` \| `consumed` \| `wrong_address`) |
+| `keys.export_rejected` | warn | `reason` (`invalid` \| `expired`). The confirmation store cannot tell an expired token from a consumed one, nor an unknown token from a foreign address, by design (data-model.md §6), so `expired` covers expired and consumed and `invalid` covers unknown and foreign. |
 
 ### 3.6 Network
 
@@ -170,7 +170,8 @@ are written and joined by `request_id`:
 | `coordinator.rejected` | `coordinator.rejected` |
 | `keys.replaced` | `keys.stored` (then `keys.applied` or `keys.apply_failed`) |
 | `keys.generated` | `keys.stored` (then `keys.applied` or `keys.apply_failed`) |
-| `keys.rejected` | `keys.in_use_rejected` |
+| `keys.rejected` | `keys.in_use_rejected` when the reason is `key_in_use`; none for a validation failure, which is an `api.request` record with its 4xx status |
+| `keys.apply_failed` | `keys.apply_failed` |
 | `keys.export_requested` | `keys.export_requested` |
 | `keys.exported` | `keys.exported` |
 | `keys.export_rejected` | `keys.export_rejected` |
