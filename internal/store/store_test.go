@@ -706,3 +706,49 @@ func TestWithTxRollsBackAudit(t *testing.T) {
 		t.Fatalf("audit row count = %d after commit, want 1", got)
 	}
 }
+
+// TestKeyAuditActionsAreDefined proves every key action of data-model.md §7 is
+// registered with the one outcome it carries, so refused key work is
+// attributable (FR-019, SC-009). Each action is written with its outcome and
+// refused with the other two, which is what makes the action set closed.
+func TestKeyAuditActionsAreDefined(t *testing.T) {
+	ctx := t.Context()
+	s := openTestStore(t)
+
+	actions := []struct {
+		action  AuditAction
+		outcome AuditOutcome
+	}{
+		{AuditKeysReplaced, OutcomeSucceeded},
+		{AuditKeysGenerated, OutcomeSucceeded},
+		{AuditKeysRejected, OutcomeRejected},
+		{AuditKeysApplyFailed, OutcomeFailed},
+		{AuditKeysExportRequested, OutcomeSucceeded},
+		{AuditKeysExported, OutcomeSucceeded},
+		{AuditKeysExportRejected, OutcomeRejected},
+	}
+	for _, tc := range actions {
+		entry := AuditEntry{
+			Action:    tc.action,
+			ActorAddr: "192.0.2.10",
+			RequestID: "req-" + string(tc.action),
+			Outcome:   tc.outcome,
+		}
+		if _, err := s.AppendAudit(ctx, entry); err != nil {
+			t.Errorf("AppendAudit %s: %v", tc.action, err)
+		}
+		for _, wrong := range []AuditOutcome{OutcomeSucceeded, OutcomeFailed, OutcomeRejected} {
+			if wrong == tc.outcome {
+				continue
+			}
+			bad := entry
+			bad.Outcome = wrong
+			if _, err := s.AppendAudit(ctx, bad); err == nil {
+				t.Errorf("AppendAudit accepted %s with outcome %s", tc.action, wrong)
+			}
+		}
+	}
+	if got := auditCount(t, s); got != len(actions) {
+		t.Errorf("audit row count = %d, want %d: a refused row must not be written", got, len(actions))
+	}
+}
