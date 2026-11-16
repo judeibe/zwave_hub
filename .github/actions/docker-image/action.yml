@@ -1,0 +1,70 @@
+name: Docker image
+description: Build the image, and optionally push it to ghcr.io with signed provenance.
+
+inputs:
+  push:
+    description: Push the image and attest its provenance. Needs packages, id-token and attestations write.
+    default: "false"
+  image-name:
+    description: Image repository to tag and push.
+    required: true
+  github-token:
+    description: Token used to log in to ghcr.io when pushing.
+    required: true
+  release-tag:
+    description: Version tag from semantic-release, e.g. v1.2.3. Empty skips the semver tags.
+    default: ""
+
+outputs:
+  digest:
+    description: Digest of the built image.
+    value: ${{ steps.build.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    - uses: docker/setup-buildx-action@v3
+
+    - name: Log in to ghcr.io
+      if: inputs.push == 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.github-token }}
+
+    - id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ inputs.image-name }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}},value=${{ inputs.release-tag }}
+          type=semver,pattern={{major}}.{{minor}},value=${{ inputs.release-tag }}
+          type=semver,pattern={{major}},value=${{ inputs.release-tag }}
+          type=sha,format=short
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - id: build
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: deploy/Dockerfile
+        platforms: linux/amd64
+        push: ${{ inputs.push == 'true' }}
+        build-args: VERSION=${{ inputs.release-tag || 'dev' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        provenance: mode=max
+        sbom: true
+
+    - name: Attest build provenance
+      if: inputs.push == 'true'
+      uses: actions/attest-build-provenance@v2
+      with:
+        subject-name: ${{ inputs.image-name }}
+        subject-digest: ${{ steps.build.outputs.digest }}
+        push-to-registry: true

@@ -1,0 +1,12 @@
+{
+  "name": "zwave-hub-sidecar",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pins the zwave-js server the hub supervises. Installed at /opt/zwave-sidecar in the image; not published.",
+  "dependencies": {
+    "@zwave-js/server": "3.12.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
