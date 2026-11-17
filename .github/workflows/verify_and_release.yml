@@ -16,13 +16,16 @@ env:
 
 jobs:
   verify:
+    name: Verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/verify
 
   release:
-    name: Version Release
+    name: Release
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -30,6 +33,7 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
+      id-token: write # to enable use of OIDC for trusted publishing and npm provenance
     outputs:
       tag: ${{ steps.release.outputs.new_release_git_tag }}
     steps:
@@ -41,8 +45,9 @@ jobs:
         with:
           go-version-file: go.mod
       - id: release
-        uses: cycjimmy/semantic-release-action@v4
+        uses: cycjimmy/semantic-release-action@v8
         with:
+          skip_npm_plugin: true
           semantic_version: 24
           extra_plugins: |
             conventional-changelog-conventionalcommits@8

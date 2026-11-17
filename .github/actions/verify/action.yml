@@ -9,7 +9,7 @@ runs:
         go-version-file: go.mod
     - uses: actions/setup-node@v4
       with:
-        node-version: "26"
+        node-version: "lts/*"
         cache: npm
         cache-dependency-path: sidecar/package-lock.json
     # `make build` installs sidecar/node_modules, which `make test-contract`
